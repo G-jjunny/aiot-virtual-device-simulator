@@ -1,9 +1,12 @@
-"""메인 루프 — 디바이스 탐색, 프로비저닝, 틱 발행, 정상 종료.
+"""메인 루프 — 인벤토리 로딩, 토큰 교환, 틱 발행, 제어 명령 처리, 정상 종료.
 
 captured_at은 오프셋 없이(naive) 현재 KST 벽시계 숫자로 보낸다. 백엔드가
 오프셋을 파싱한 뒤 버리고 그 숫자를 그대로 timestamptz(UTC)에 저장하므로,
 오프셋을 붙이면 적재 시각이 9시간 밀린다. 실제 디바이스가 남기는 데이터와
 같은 KST 축에 놓이게 하려면 naive로 보내야 한다.
+
+0.2.0에서 admin API 디스커버리를 걷어냈다. 발행 대상은 devices.yaml에 주입된
+자격증명이 전부이며, 프로비저닝은 secret→JWT 교환 한 단계뿐이다.
 """
 
 from __future__ import annotations
@@ -14,10 +17,19 @@ import signal
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Sequence
 
-from livesim.api import AdminApi, DeviceRecord
-from livesim.config import DROPOUT, SILENCE, Scenario, Settings
+from livesim import control
+from livesim.api import ApiError, exchange_device_token
+from livesim.config import (
+    ALERT_BURST,
+    DROPOUT,
+    POWER_OFF,
+    SILENCE,
+    DeviceCredential,
+    Scenario,
+    Settings,
+)
 from livesim.device import LiveDevice, MqttPublisher, Publisher
 from livesim.scheduler import EventScheduler
 
@@ -25,7 +37,7 @@ LOG = logging.getLogger("livesim.runner")
 
 INITIAL_BACKOFF_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 300.0
-SLEEP_STEP_SECONDS = 0.5
+CONTROL_POLL_SECONDS = 1.0
 
 _KST = timezone(timedelta(hours=9))
 
@@ -43,6 +55,18 @@ def kst_now() -> datetime:
     return datetime.now(_KST).replace(tzinfo=None, microsecond=0)
 
 
+def select_devices(
+    inventory: Sequence[DeviceCredential], scenario: Scenario
+) -> list[DeviceCredential]:
+    """시나리오의 일시 비활성 목록과 상한을 적용해 발행 대상을 고른다."""
+    excluded = set(scenario.exclude_devices)
+    selected = [item for item in inventory if item.device_id not in excluded]
+    selected.sort(key=lambda item: item.device_id)
+    if scenario.max_devices > 0:
+        selected = selected[: scenario.max_devices]
+    return selected
+
+
 @dataclass
 class TickStats:
     published: int = 0
@@ -51,6 +75,8 @@ class TickStats:
     unavailable: int = 0
     failed: int = 0
     flushed: int = 0
+    powered_off: int = 0
+    disabled: int = 0
 
 
 @dataclass
@@ -62,26 +88,30 @@ class DeviceSession:
     publisher만 교체한다.
     """
 
-    record: DeviceRecord
+    credential: DeviceCredential
     device: LiveDevice | None = None
     connected: bool = False
     next_attempt: float = 0.0
     backoff: float = 0.0
+    disabled: bool = False
+    disabled_reason: str = ""
 
 
 class Runner:
     def __init__(
         self,
         scenario: Scenario,
-        api: AdminApi,
-        connect: Callable[[DeviceRecord], Publisher],
+        inventory: Sequence[DeviceCredential],
+        connect: Callable[[DeviceCredential], Publisher],
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.time,
+        control_dir: str | None = None,
     ) -> None:
         self.scenario = scenario
-        self.api = api
+        self.inventory = tuple(inventory)
         self.connect = connect
         self.clock = clock
+        self.control_dir = control_dir
         self.scheduler = EventScheduler(
             scenario.events, scenario.interval_seconds, rng=rng
         )
@@ -91,53 +121,58 @@ class Runner:
 
     # ---- 준비 -----------------------------------------------------------
 
-    def start(self) -> list[DeviceRecord]:
-        self.api.login()
-        records = self.api.resolve_devices(
-            self.scenario.exclude_devices, self.scenario.max_devices
-        )
-        if not records:
+    def start(self) -> list[DeviceCredential]:
+        selected = select_devices(self.inventory, self.scenario)
+        if not selected:
             raise RunnerError(
-                "발행 대상 디바이스가 없습니다. 백엔드에 디바이스가 등록되어 있는지, "
+                "발행 대상 디바이스가 없습니다. devices.yaml에 항목이 있는지, "
                 "시나리오의 exclude_devices가 과도하지 않은지 확인하세요."
             )
-        self.sessions = {record.device_id: DeviceSession(record) for record in records}
-        self.order = [record.device_id for record in records]
-        return records
+        self.sessions = {
+            item.device_id: DeviceSession(item) for item in selected
+        }
+        self.order = [item.device_id for item in selected]
+        return selected
 
     # ---- 실행 -----------------------------------------------------------
 
     def run(self, stop: Callable[[], bool] | None = None) -> None:
         stop = stop if stop is not None else _install_signal_stop()
-        records = self.start()
+        selected = self.start()
         LOG.info(
             "%d대 발행 시작 — 시나리오 '%s', %d초 주기",
-            len(records),
+            len(selected),
             self.scenario.name,
             self.scenario.interval_seconds,
         )
+        if self.control_dir:
+            LOG.info("제어 채널: %s (livesim ctl ...)", self.control_dir)
 
         next_tick = self.clock()
         try:
             while not stop():
                 stats = self.tick(kst_now(), self.clock())
                 LOG.info(
-                    "tick %d: 발행 %d, 버퍼 %d, 재전송 %d, 침묵 %d, 미접속 %d, 실패 %d",
+                    "tick %d: 발행 %d, 버퍼 %d, 재전송 %d, 침묵 %d, 전원off %d, "
+                    "미접속 %d, 실패 %d, 비활성 %d",
                     self.tick_index - 1,
                     stats.published,
                     stats.buffered,
                     stats.flushed,
                     stats.silenced,
+                    stats.powered_off,
                     stats.unavailable,
                     stats.failed,
+                    stats.disabled,
                 )
+                self._publish_state()
                 next_tick += self.scenario.interval_seconds
                 now = self.clock()
                 if next_tick <= now:
                     # 발행이 주기보다 오래 걸리면 밀린 틱을 몰아 실행하게 된다.
                     # 따라잡기 폭주 대신 현재 시각 기준으로 다시 맞춘다.
                     next_tick = now + self.scenario.interval_seconds
-                _sleep_until(next_tick, stop)
+                _sleep_until(next_tick, stop, on_poll=self.drain_control)
         finally:
             self.shutdown()
 
@@ -160,6 +195,15 @@ class Runner:
         for index, device_id in enumerate(self.order):
             session = self.sessions[device_id]
             event = plan.active.get(device_id)
+
+            if session.disabled:
+                stats.disabled += 1
+                continue
+            if event is not None and event.type == POWER_OFF:
+                # 전원 차단은 발행도 버퍼링도 하지 않는다. 꺼진 기기는
+                # 측정 자체를 하지 않으므로 나중에 재전송할 것도 없다.
+                stats.powered_off += 1
+                continue
             if event is not None and event.type == SILENCE:
                 # 침묵은 버퍼링도 하지 않는다 — 데이터 유실 자체를 모의한다.
                 stats.silenced += 1
@@ -168,17 +212,18 @@ class Runner:
             offline = session.device is not None and not session.device.online
             if not offline:
                 if not self._ensure_connected(session, now):
-                    stats.unavailable += 1
+                    stats.unavailable += int(not session.disabled)
+                    stats.disabled += int(session.disabled)
                     continue
+                if event is not None and event.type == DROPOUT:
+                    # 단절 적용은 접속을 확보한 뒤에 한다. 아직 붙어본 적 없는
+                    # 디바이스는 버퍼를 담을 LiveDevice 자체가 없기 때문이다.
+                    session.device.go_offline()
 
             device = session.device
             if device is None:
                 stats.unavailable += 1
                 continue
-            if not offline and event is not None and event.type == DROPOUT:
-                # 단절 적용은 접속을 확보한 뒤에 한다. 아직 붙어본 적 없는
-                # 디바이스는 버퍼를 담을 LiveDevice 자체가 없기 때문이다.
-                device.go_offline()
             try:
                 overrides = event.overrides if event is not None else None
                 if device.publish(ts, seed=self.tick_index * 1000 + index,
@@ -203,15 +248,109 @@ class Runner:
         for session in self.sessions.values():
             if session.device is not None:
                 pending += session.device.pending
-            if session.connected and session.device is not None:
-                try:
-                    session.device.publisher.disconnect()
-                except Exception as exc:
-                    LOG.warning("연결 해제 실패 (%s): %s", session.record.device_id, exc)
-            session.connected = False
+            self._disconnect(session)
         if pending:
             LOG.info("종료 — 재전송하지 못한 버퍼 %d건 폐기", pending)
         LOG.info("종료 완료.")
+
+    # ---- 제어 채널 -------------------------------------------------------
+
+    def drain_control(self) -> int:
+        """제어 디렉터리의 명령을 읽어 적용한다. 적용한 개수를 돌려준다."""
+        if not self.control_dir:
+            return 0
+        commands = control.drain_commands(self.control_dir)
+        for command in commands:
+            self._apply_command(command)
+        if commands:
+            self._publish_state()
+        return len(commands)
+
+    def _apply_command(self, command: control.Command) -> None:
+        session = self.sessions.get(command.device_id)
+        if session is None:
+            LOG.warning(
+                "제어 명령 대상 없음: %s (발행 대상이 아닙니다)", command.device_id
+            )
+            return
+
+        now = self.clock()
+        seconds = command.minutes * 60 if command.minutes is not None else None
+
+        if command.command == control.OFF:
+            self.scheduler.force(command.device_id, POWER_OFF, now)
+            self._disconnect(session)
+            # 사람이 직접 끈 것이므로 백오프를 남기지 않는다. on 하면 즉시 붙어야 한다.
+            session.next_attempt = 0.0
+            session.backoff = 0.0
+            LOG.info("[ctl] 전원 off: %s", command.device_id)
+        elif command.command == control.ON:
+            self.scheduler.release(command.device_id)
+            session.next_attempt = 0.0
+            session.backoff = 0.0
+            if session.device is not None and not session.device.online:
+                # release()는 plan.ended를 거치지 않으므로 dropout 만료 때와 달리
+                # _resume이 자동으로 불리지 않는다. 되돌려주지 않으면 이 디바이스는
+                # 영영 버퍼링만 하며 재접속조차 시도하지 않는다. 만료 경로와 같은
+                # 복구 로직을 그대로 쓴다 (접속돼 있으면 버퍼도 즉시 재전송).
+                self._resume(session)
+            LOG.info("[ctl] 전원 on: %s (다음 틱에 재접속)", command.device_id)
+        elif command.command == control.DROPOUT:
+            self.scheduler.force(command.device_id, DROPOUT, now, seconds)
+            if session.device is not None:
+                session.device.go_offline()
+            LOG.info("[ctl] 통신 단절: %s (%s분)", command.device_id, command.minutes)
+        elif command.command == control.BURST:
+            self.scheduler.force(
+                command.device_id, ALERT_BURST, now, seconds, self._burst_overrides()
+            )
+            LOG.info("[ctl] 오염 급증: %s (%s분)", command.device_id, command.minutes)
+
+    def _burst_overrides(self) -> dict[str, float]:
+        """시나리오의 alert_burst 목표값을 재사용하고, 없으면 내장 기본값."""
+        for spec in self.scenario.events:
+            if spec.type == ALERT_BURST and spec.overrides:
+                return dict(spec.overrides)
+        return dict(control.DEFAULT_BURST_OVERRIDES)
+
+    def snapshot(self) -> dict:
+        """디바이스별 현재 상태. state.json으로 기록되고 `ctl status`가 읽는다."""
+        now = self.clock()
+        devices = []
+        for device_id in self.order:
+            session = self.sessions[device_id]
+            described = self.scheduler.describe(device_id)
+            event_type, ends_at, manual = described or (None, None, False)
+            remaining = None
+            if ends_at is not None and ends_at != float("inf"):
+                remaining = round(max(0.0, ends_at - now), 1)
+            devices.append({
+                "device_id": device_id,
+                "connected": session.connected,
+                "online": session.device.online if session.device else False,
+                "pending": session.device.pending if session.device else 0,
+                "event": event_type,
+                "event_manual": manual,
+                "event_ends_in": remaining,
+                "disabled": session.disabled,
+                "disabled_reason": session.disabled_reason,
+            })
+        return {
+            "updated_at": kst_now().isoformat(),
+            "tick": self.tick_index,
+            "scenario": self.scenario.name,
+            "interval_seconds": self.scenario.interval_seconds,
+            "devices": devices,
+        }
+
+    def _publish_state(self) -> None:
+        if not self.control_dir:
+            return
+        try:
+            control.write_state(self.control_dir, self.snapshot())
+        except OSError as exc:
+            # 상태 기록 실패가 발행을 막으면 안 된다 (읽기 전용 마운트 등).
+            LOG.warning("상태 파일 기록 실패: %s", exc)
 
     # ---- 커넥션 ---------------------------------------------------------
 
@@ -221,34 +360,54 @@ class Runner:
         if now < session.next_attempt:
             return False
 
-        device_id = session.record.device_id
+        device_id = session.credential.device_id
         try:
-            publisher = self.connect(session.record)
+            publisher = self.connect(session.credential)
+        except ApiError as exc:
+            if exc.is_rejected:
+                # 4xx는 secret이 폐기·오기입된 것이라 재시도해도 같다. 이 디바이스만
+                # 접고 나머지는 계속 발행한다 (devices.yaml 수정 후 재기동 필요).
+                session.disabled = True
+                session.disabled_reason = f"자격증명 거부 ({exc.status})"
+                LOG.error(
+                    "자격증명 거부 — %s 발행 제외: %s. devices.yaml의 secret을 "
+                    "확인하고 재기동하세요.",
+                    device_id,
+                    exc,
+                )
+                return False
+            return self._schedule_retry(session, now, exc)
         except Exception as exc:
-            session.backoff = min(
-                MAX_BACKOFF_SECONDS,
-                max(INITIAL_BACKOFF_SECONDS, session.backoff * 2),
-            )
-            session.next_attempt = now + session.backoff
-            LOG.warning(
-                "접속 실패 (%s): %s — %.0f초 후 재시도", device_id, exc, session.backoff
-            )
-            return False
+            return self._schedule_retry(session, now, exc)
 
         if session.device is None:
-            session.device = LiveDevice(session.record, publisher)
+            session.device = LiveDevice(session.credential, publisher)
         else:
             session.device.publisher = publisher
-        device = session.device
         session.connected = True
         session.backoff = 0.0
         session.next_attempt = 0.0
         LOG.info("접속 완료: %s", device_id)
 
         # 단절 중이 아닌데 버퍼가 남아 있다면 이전 재전송이 실패한 것이다.
-        if device.online and device.pending:
+        if session.device.online and session.device.pending:
             self._resume(session)
         return True
+
+    def _schedule_retry(
+        self, session: DeviceSession, now: float, exc: Exception
+    ) -> bool:
+        session.backoff = min(
+            MAX_BACKOFF_SECONDS, max(INITIAL_BACKOFF_SECONDS, session.backoff * 2)
+        )
+        session.next_attempt = now + session.backoff
+        LOG.warning(
+            "접속 실패 (%s): %s — %.0f초 후 재시도",
+            session.credential.device_id,
+            exc,
+            session.backoff,
+        )
+        return False
 
     def _resume(self, session: DeviceSession) -> int:
         """dropout 종료 — 버퍼를 batch로 재전송한다."""
@@ -262,45 +421,52 @@ class Runner:
         try:
             flushed = device.go_online()
         except Exception as exc:
-            LOG.warning("버퍼 재전송 실패 (%s): %s", session.record.device_id, exc)
+            LOG.warning("버퍼 재전송 실패 (%s): %s", session.credential.device_id, exc)
             self._drop(session, self.clock())
             return 0
         if flushed:
-            LOG.info("버퍼 재전송 %d건 (%s)", flushed, session.record.device_id)
+            LOG.info("버퍼 재전송 %d건 (%s)", flushed, session.credential.device_id)
         if device.dropped:
             LOG.warning(
-                "버퍼 상한 초과로 %d건 폐기 (%s)", device.dropped, session.record.device_id
+                "버퍼 상한 초과로 %d건 폐기 (%s)",
+                device.dropped,
+                session.credential.device_id,
             )
             device.dropped = 0
         return flushed
 
-    def _drop(self, session: DeviceSession, now: float) -> None:
+    def _disconnect(self, session: DeviceSession) -> None:
         if session.device is not None and session.connected:
             try:
                 session.device.publisher.disconnect()
-            except Exception:
-                pass
+            except Exception as exc:
+                LOG.warning(
+                    "연결 해제 실패 (%s): %s", session.credential.device_id, exc
+                )
         session.connected = False
+
+    def _drop(self, session: DeviceSession, now: float) -> None:
+        self._disconnect(session)
         session.backoff = max(INITIAL_BACKOFF_SECONDS, session.backoff)
         session.next_attempt = now + session.backoff
 
 
-def make_connector(
-    settings: Settings, api: AdminApi
-) -> Callable[[DeviceRecord], Publisher]:
+def make_connector(settings: Settings) -> Callable[[DeviceCredential], Publisher]:
     """디바이스별 MQTT 커넥션 팩토리.
 
     매 접속마다 토큰을 새로 받는다 — 재접속 시점에 옛 JWT가 만료됐을 수 있고,
-    한 번 거부되면 그 디바이스는 영영 붙지 못한다.
+    paho의 자동 재접속은 저장된 옛 password를 그대로 재사용하기 때문이다.
     """
 
-    def connect(record: DeviceRecord) -> Publisher:
-        token = api.provision_device_token(record.device_id)
+    def connect(credential: DeviceCredential) -> Publisher:
+        token = exchange_device_token(
+            settings.api_base_url, credential.device_id, credential.secret
+        )
         publisher = MqttPublisher(
             settings.mqtt_host,
             settings.mqtt_port,
-            client_id=f"livesim-{record.device_id}",
-            username=record.device_id,
+            client_id=f"livesim-{credential.device_id}",
+            username=credential.device_id,
             password=token,
         )
         publisher.connect()
@@ -310,10 +476,17 @@ def make_connector(
 
 
 def run(
-    settings: Settings, scenario: Scenario, stop: Callable[[], bool] | None = None
+    settings: Settings,
+    scenario: Scenario,
+    inventory: Sequence[DeviceCredential],
+    stop: Callable[[], bool] | None = None,
 ) -> None:
-    api = AdminApi(settings.api_base_url, settings.admin_username, settings.admin_password)
-    Runner(scenario, api, make_connector(settings, api)).run(stop)
+    Runner(
+        scenario,
+        inventory,
+        make_connector(settings),
+        control_dir=settings.control_dir,
+    ).run(stop)
 
 
 def _install_signal_stop() -> Callable[[], bool]:
@@ -333,10 +506,16 @@ def _install_signal_stop() -> Callable[[], bool]:
     return lambda: stopped["flag"]
 
 
-def _sleep_until(deadline: float, stop: Callable[[], bool]) -> None:
-    """stop()을 주기적으로 확인하며 deadline까지 대기한다."""
+def _sleep_until(
+    deadline: float,
+    stop: Callable[[], bool],
+    on_poll: Callable[[], object] | None = None,
+) -> None:
+    """stop()을 확인하며 deadline까지 대기하고, 1초마다 제어 명령을 처리한다."""
     while not stop():
         remaining = deadline - time.time()
         if remaining <= 0:
             return
-        time.sleep(min(SLEEP_STEP_SECONDS, remaining))
+        time.sleep(min(CONTROL_POLL_SECONDS, remaining))
+        if on_poll is not None:
+            on_poll()
