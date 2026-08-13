@@ -7,9 +7,14 @@ __pycache__/
 
 # 디바이스 시크릿 평문 — 절대 커밋 금지 (devices.example.yaml만 커밋)
 devices.yaml
+# 패널이 주입 전에 남기는 사본. 원본과 똑같이 시크릿 평문을 담는다.
+devices.yaml.*
+devices-*.yaml
+!devices.example.yaml
 
 # 러너와 ctl이 주고받는 런타임 상태
 control/
+control-*/
 
 # 로컬 실행용 자격증명 — 절대 커밋 금지
 .env
