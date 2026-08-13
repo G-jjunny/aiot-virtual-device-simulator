@@ -1,0 +1,11 @@
+name: stress
+description: 고빈도 발행 — 60초 주기로 적재 파이프라인에 부하를 준다
+interval_seconds: 60
+max_devices: 0
+exclude_devices: []
+events:
+  # 짧은 주기에 맞춰 이벤트 빈도도 올려, 하루를 기다리지 않고 단절/재전송
+  # 경로를 관찰할 수 있게 한다.
+  - type: dropout
+    per_device_per_day: 4
+    duration_minutes: [2, 5]

@@ -1,0 +1,29 @@
+name: daily-ops
+description: 현실적 24시간 운영 패턴 — 간헐적 통신 단절, 데이터 유실, 오염 급증
+interval_seconds: 300
+max_devices: 0
+# 시드에서 의도적으로 OFFLINE인 디바이스. 발행하면 백엔드 트리거가 ONLINE으로
+# 되살려 "일부 디바이스는 꺼져 있다"는 시드 상태가 사라진다.
+exclude_devices:
+  - AQ-SONGPA-02
+  - AQ-SONGPA-03
+events:
+  # 통신 단절: 발행을 로컬 버퍼에 쌓았다가 복구 시 batch로 일괄 재전송한다.
+  - type: dropout
+    per_device_per_day: 0.2
+    duration_minutes: [5, 20]
+
+  # 침묵: 버퍼링 없이 그냥 건너뛴다 — 재전송으로도 메울 수 없는 실제 유실.
+  - type: silence
+    per_device_per_day: 0.05
+    duration_minutes: [15, 30]
+
+  # 오염 급증: 목표값 부근으로 값을 끌어올린다 (±10% 노이즈 후 센서 범위로 클램프).
+  - type: alert_burst
+    per_device_per_day: 0.1
+    duration_minutes: [10, 30]
+    overrides:
+      pm25: 120
+      pm10: 180
+      co2: 2200
+      tvoc: 900
