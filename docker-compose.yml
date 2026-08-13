@@ -1,0 +1,24 @@
+services:
+  livesim:
+    build: .
+    container_name: livesim
+    env_file: .env
+    command: ["scenarios/daily-ops.yaml"]
+    restart: unless-stopped
+    # 컨테이너에서 호스트의 백엔드/EMQX에 붙을 때 쓴다
+    # (.env에 API_BASE_URL=http://host.docker.internal:8080 형태로 지정).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # dry-run은 접속 없이 시나리오만 검증한다. 프로세스가 살아 있고 시나리오가
+    # 여전히 유효한지 확인하는 용도이며, 발행 성공 여부는 보지 않는다.
+    healthcheck:
+      test: ["CMD", "python", "-m", "livesim", "--dry-run", "scenarios/daily-ops.yaml"]
+      interval: 5m
+      timeout: 30s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
