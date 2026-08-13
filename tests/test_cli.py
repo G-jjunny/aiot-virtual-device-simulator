@@ -90,6 +90,14 @@ def test_ctl_status_needs_no_device():
     assert args.ctl_command == "status"
 
 
+def test_ctl_reload_needs_no_device():
+    """플릿 전체 대상이라 device_id가 없다."""
+    args = parse(["ctl", "reload"])
+
+    assert args.ctl_command == "reload"
+    assert not hasattr(args, "device_id")
+
+
 def test_ctl_without_subcommand_is_rejected():
     with pytest.raises(SystemExit):
         parse(["ctl"])
@@ -106,3 +114,26 @@ def test_off_does_not_accept_minutes():
 
 def test_rehearse_parses():
     assert parse(["rehearse"]).command == "rehearse"
+
+
+# ---- panel -------------------------------------------------------------
+
+
+def test_panel_defaults_to_loopback():
+    """인증이 없으므로 기본값이 공인 바인딩이면 안 된다."""
+    args = parse(["panel"])
+
+    assert args.command == "panel"
+    assert args.host == "127.0.0.1"
+    assert args.port == 8390
+
+
+def test_panel_accepts_host_and_port():
+    args = parse(["panel", "--host", "0.0.0.0", "--port", "9000"])
+
+    assert args.host == "0.0.0.0"
+    assert args.port == 9000
+
+
+def test_panel_is_a_known_subcommand():
+    assert normalize_argv(["panel"]) == ["panel"]

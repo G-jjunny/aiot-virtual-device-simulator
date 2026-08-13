@@ -30,6 +30,8 @@ from livesim.config import (
     load_scenario,
     load_settings,
 )
+from livesim.panel import DEFAULT_HOST as PANEL_DEFAULT_HOST
+from livesim.panel import DEFAULT_PORT as PANEL_DEFAULT_PORT
 from livesim.rehearse import rehearse
 from livesim.runner import RunnerError, run, select_devices
 
@@ -37,7 +39,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SCENARIO = ROOT / "scenarios" / "steady.yaml"
 LOG_FORMAT = "%(asctime)s %(levelname)s %(message)s"
 
-SUBCOMMANDS = ("run", "ctl", "rehearse")
+SUBCOMMANDS = ("run", "ctl", "rehearse", "panel")
 GLOBAL_FLAGS = ("-h", "--help", "--version")
 
 
@@ -137,14 +139,23 @@ def cmd_ctl(args: argparse.Namespace) -> int:
         return _print_status(settings.control_dir)
 
     minutes = getattr(args, "minutes", None)
+    device_id = getattr(args, "device_id", "")
     control.write_command(
-        settings.control_dir, args.ctl_command, args.device_id, minutes
+        settings.control_dir, args.ctl_command, device_id, minutes
     )
     suffix = f" ({minutes:g}분)" if minutes is not None else ""
+    target = f" → {device_id}" if device_id else ""
     print(
-        f"[ctl] {args.ctl_command} → {args.device_id}{suffix} 명령을 넣었습니다 "
+        f"[ctl] {args.ctl_command}{target}{suffix} 명령을 넣었습니다 "
         f"({settings.control_dir}). 러너가 1초 내에 적용합니다."
     )
+    return 0
+
+
+def cmd_panel(args: argparse.Namespace) -> int:
+    from livesim.panel import serve
+
+    serve(load_settings(), args.host, args.port)
     return 0
 
 
@@ -237,8 +248,22 @@ def build_parser() -> argparse.ArgumentParser:
             "--minutes", type=float, default=10.0, help="지속 시간(분, 기본 10)"
         )
     ctl_sub.add_parser("status", help="state.json을 표로 출력")
+    ctl_sub.add_parser(
+        control.RELOAD, help="devices.yaml을 다시 읽어 플릿에 반영 (device_id 불필요)"
+    )
 
     sub.add_parser("rehearse", help="보안 리허설 (거부되어야 정상인 3케이스)")
+
+    panel_parser = sub.add_parser("panel", help="로컬 웹 패널 (가상 하드웨어 실험대)")
+    panel_parser.add_argument(
+        "--port", type=int, default=PANEL_DEFAULT_PORT,
+        help=f"수신 포트 (기본 {PANEL_DEFAULT_PORT})",
+    )
+    panel_parser.add_argument(
+        "--host", default=PANEL_DEFAULT_HOST,
+        help=f"바인딩 주소 (기본 {PANEL_DEFAULT_HOST} — 로컬 전용)",
+    )
+    panel_parser.add_argument("--log-level", default="INFO", help="로그 레벨 (기본: INFO)")
     return parser
 
 
@@ -259,6 +284,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_ctl(args)
         if args.command == "rehearse":
             return cmd_rehearse(args)
+        if args.command == "panel":
+            return cmd_panel(args)
         return 2
     except FileNotFoundError as exc:
         print(f"[livesim] 파일을 찾을 수 없습니다: {exc}", file=sys.stderr)
