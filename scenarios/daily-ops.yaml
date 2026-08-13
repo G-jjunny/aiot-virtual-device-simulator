@@ -4,9 +4,11 @@ interval_seconds: 300
 max_devices: 0
 # 시드에서 의도적으로 OFFLINE인 디바이스. 발행하면 백엔드 트리거가 ONLINE으로
 # 되살려 "일부 디바이스는 꺼져 있다"는 시드 상태가 사라진다.
+# testDevice는 수동 API 테스트 잔재 — 시뮬레이션 대상이 아니다.
 exclude_devices:
   - AQ-SONGPA-02
   - AQ-SONGPA-03
+  - testDevice
 events:
   # 통신 단절: 발행을 로컬 버퍼에 쌓았다가 복구 시 batch로 일괄 재전송한다.
   - type: dropout
