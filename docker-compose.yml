@@ -9,9 +9,13 @@ services:
     # (.env에 API_BASE_URL=http://host.docker.internal:8080 형태로 지정).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    environment:
+      DEVICES_FILE: /app/inventory/devices.yaml
     volumes:
       # 디바이스 자격증명은 이미지가 아니라 볼륨으로 주입한다 (읽기 전용).
-      - ./devices.yaml:/app/devices.yaml:ro
+      # 파일이 아니라 디렉터리를 마운트한다 — 단일 파일 바인드 마운트는 패널의
+      # 원자적 교체(rename)가 EBUSY로 막히고, inode가 바뀌면 stale이 된다.
+      - ./inventory:/app/inventory:ro
       # 제어 채널. 호스트에서 `livesim ctl`을 쓰려면 이 디렉터리를 공유해야 한다.
       - ./control:/app/control
     # dry-run은 접속 없이 시나리오만 검증한다. 프로세스가 살아 있고 시나리오가
@@ -37,9 +41,12 @@ services:
     # 127.0.0.1로만 매핑한다 — 패널에는 인증이 없으므로 호스트 밖으로 열면 안 된다.
     ports:
       - "127.0.0.1:8390:8390"
+    environment:
+      DEVICES_FILE: /app/inventory/devices.yaml
     volumes:
       # 패널은 기기 주입을 위해 쓰기 권한이 필요하다 (러너 쪽은 ro 유지).
-      - ./devices.yaml:/app/devices.yaml
+      # 디렉터리 마운트여야 원자적 교체(rename)와 핫 리로드가 동작한다.
+      - ./inventory:/app/inventory
       # 러너와 같은 제어 채널을 봐야 명령/상태가 오간다.
       - ./control:/app/control
     logging:

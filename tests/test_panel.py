@@ -326,6 +326,31 @@ def test_append_rejects_file_without_items(tmp_path):
     assert yaml.safe_load(path.read_text(encoding="utf-8")) == {"devices": []}
 
 
+def test_append_explains_single_file_mount_failure(tmp_path, monkeypatch):
+    """단일 파일 바인드 마운트에선 rename이 EBUSY로 막힌다 (2026-08-13 운영 결함).
+
+    OSError 원문만 보면 원인을 알 수 없으므로, 디렉터리 마운트로 안내한다.
+    원본은 그대로, 임시 파일은 정리되어야 한다.
+    """
+    path = tmp_path / "devices.yaml"
+    original = (
+        "devices:\n- device_id: AQ-01\n  secret: s1\n"
+        "  site_id: S-1\n  device_type: FIXED\n  facility_type: OFFICE\n"
+    )
+    path.write_text(original, encoding="utf-8")
+
+    def deny(src, dst):
+        raise OSError(16, "Device or resource busy")
+
+    monkeypatch.setattr("livesim.panel.os.replace", deny)
+
+    with pytest.raises(PanelError, match="마운트"):
+        append_device(path, NEW_DEVICE)
+
+    assert path.read_text(encoding="utf-8") == original
+    assert list(path.parent.glob(".*tmp")) == []
+
+
 def test_append_quotes_values_safely(tmp_path):
     """YAML 특수문자가 든 시크릿이 파일 구조를 깨뜨리면 안 된다."""
     path = tmp_path / "devices.yaml"

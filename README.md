@@ -299,18 +299,22 @@ livesim rehearse
 ## 6. Docker로 24시간 운영
 
 ```bash
-cp .env.example .env                   # 값 채우기
-cp devices.example.yaml devices.yaml   # 발급받은 자격증명 입력 (반드시 먼저!)
+cp .env.example .env                              # 값 채우기
+mkdir -p inventory
+cp devices.example.yaml inventory/devices.yaml    # 발급받은 자격증명 입력 (반드시 먼저!)
 docker compose up -d --build
 docker compose logs -f livesim
 ```
 
-> **`devices.yaml`을 만들기 전에 `docker compose up`을 하지 마세요.** compose는 존재하지 않는
-> 파일을 볼륨으로 마운트하면 같은 이름의 **디렉터리**를 만들어버립니다. 그 상태로는 기동에
-> 실패하며(원인을 알려주는 메시지가 나옵니다), 그 디렉터리를 지우고 파일로 다시 만들어야 합니다.
+> Docker에서는 인벤토리를 **`inventory/` 디렉터리째** 마운트하고 compose가
+> `DEVICES_FILE=/app/inventory/devices.yaml`을 지정합니다. 파일 하나만 바인드 마운트하면
+> 패널의 원자적 교체(rename)가 `EBUSY`로 막히고, 교체로 inode가 바뀌면 다른 컨테이너가
+> 옛 파일을 계속 보게 됩니다(stale). 호스트에서 직접 돌릴 때는 `.env`에
+> `DEVICES_FILE=inventory/devices.yaml`을 넣거나 기본 경로(`devices.yaml`)를 쓰면 됩니다.
 
-- `devices.yaml`은 **이미지에 들어가지 않고 볼륨으로만 주입**됩니다(읽기 전용). 시크릿 평문이
-  이미지에 박히면 레지스트리에서 이미지를 받을 수 있는 모두가 디바이스를 사칭할 수 있습니다.
+- `devices.yaml`은 **이미지에 들어가지 않고 볼륨으로만 주입**됩니다(러너는 읽기 전용). 시크릿
+  평문이 이미지에 박히면 레지스트리에서 이미지를 받을 수 있는 모두가 디바이스를 사칭할 수
+  있습니다.
 - `./control`이 마운트되어 `docker exec ... ctl`과 호스트 `ctl`이 같은 채널을 봅니다.
 - `restart: unless-stopped`로 호스트 재부팅·이상 종료 후 자동 기동합니다.
 - `healthcheck`는 5분마다 `--dry-run`으로 프로세스와 설정 유효성만 확인합니다(발행 성공 여부는

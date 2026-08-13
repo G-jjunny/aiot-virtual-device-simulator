@@ -137,7 +137,18 @@ def append_device(devices_file: str | Path, entry: dict[str, Any]) -> str:
         tmp.unlink(missing_ok=True)
         raise
     _backup(path)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError as exc:
+        # docker에서 devices.yaml을 "파일 하나"로 바인드 마운트하면 마운트
+        # 지점 위로 rename할 수 없다 (EBUSY). 디렉터리 마운트가 정답이다.
+        tmp.unlink(missing_ok=True)
+        raise PanelError(
+            "인벤토리 교체 실패 — devices.yaml이 단일 파일로 바인드 마운트되어 "
+            "있으면 원자적 교체(rename)가 막힙니다. 디렉터리째 마운트하고 "
+            "DEVICES_FILE로 경로를 지정하세요 (docker-compose.yml 참조). "
+            f"원인: {exc}"
+        ) from exc
     LOG.info("기기 주입: %s", credential.device_id)  # secret은 남기지 않는다
     return credential.device_id
 
