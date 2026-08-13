@@ -29,7 +29,11 @@ OFF = "off"
 ON = "on"
 DROPOUT = "dropout"
 BURST = "burst"
-COMMANDS = (OFF, ON, DROPOUT, BURST)
+RELOAD = "reload"
+COMMANDS = (OFF, ON, DROPOUT, BURST, RELOAD)
+
+DEVICE_COMMANDS = (OFF, ON, DROPOUT, BURST)
+"""대상 device_id가 필요한 명령. reload는 플릿 전체에 적용되므로 제외."""
 
 DEFAULT_BURST_OVERRIDES: dict[str, float] = {
     "pm25": 120.0, "pm10": 180.0, "co2": 2200.0, "tvoc": 900.0,
@@ -44,7 +48,7 @@ class ControlError(RuntimeError):
 @dataclass(frozen=True)
 class Command:
     command: str
-    device_id: str
+    device_id: str = ""
     minutes: float | None = None
 
 
@@ -57,11 +61,13 @@ def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
 def write_command(
     control_dir: str | Path,
     command: str,
-    device_id: str,
+    device_id: str = "",
     minutes: float | None = None,
 ) -> Path:
     if command not in COMMANDS:
         raise ControlError(f"알 수 없는 명령 '{command}' (사용 가능: {COMMANDS})")
+    if command in DEVICE_COMMANDS and not device_id:
+        raise ControlError(f"'{command}' 명령에는 device_id가 필요합니다")
     directory = Path(control_dir)
     directory.mkdir(parents=True, exist_ok=True)
     # 파일명에 시각을 넣어 사전순 = 발행순이 되게 한다. 같은 초에 두 명령이
@@ -85,7 +91,7 @@ def drain_commands(control_dir: str | Path) -> list[Command]:
         try:
             raw = json.loads(path.read_text(encoding="utf-8-sig"))
             command = str(raw["command"])
-            device_id = str(raw["device_id"])
+            device_id = str(raw.get("device_id") or "")
             minutes = raw.get("minutes")
             if command not in COMMANDS:
                 raise ValueError(f"알 수 없는 명령 '{command}'")

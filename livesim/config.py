@@ -321,30 +321,33 @@ def load_inventory(path: str | Path) -> tuple[DeviceCredential, ...]:
     credentials: list[DeviceCredential] = []
     seen: set[str] = set()
     for index, entry in enumerate(entries):
-        where = f"devices[{index}]"
-        if not isinstance(entry, dict):
-            raise InventoryError(f"{where}: 매핑이어야 합니다")
-        _check_keys(where, entry, _INVENTORY_KEYS, InventoryError)
-
-        device_id = _inventory_text(where, entry, "device_id")
-        if device_id in seen:
+        credential = parse_credential(f"devices[{index}]", entry)
+        if credential.device_id in seen:
             # 같은 device_id로 두 커넥션을 열면 EMQX가 먼저 붙은 쪽을 끊는다
             # (같은 client_id 재접속). 두 디바이스가 서로를 계속 밀어낸다.
-            raise InventoryError(f"devices: 중복된 device_id '{device_id}'")
-        seen.add(device_id)
-
-        credentials.append(
-            DeviceCredential(
-                device_id=device_id,
-                secret=_inventory_text(where, entry, "secret"),
-                site_id=_inventory_text(where, entry, "site_id"),
-                device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
-                facility_type=_inventory_enum(
-                    where, entry, "facility_type", FACILITY_TYPES
-                ),
-            )
-        )
+            raise InventoryError(f"devices: 중복된 device_id '{credential.device_id}'")
+        seen.add(credential.device_id)
+        credentials.append(credential)
     return tuple(credentials)
+
+
+def parse_credential(where: str, entry: Any) -> DeviceCredential:
+    """인벤토리 항목 1개를 검증해 자격증명으로 만든다.
+
+    파일 로딩과 분리해 둔 이유: 웹 패널이 새 기기를 주입할 때 같은 규칙으로
+    입력을 검증해야 하는데, 검증 로직이 두 벌이 되면 파일로는 통과하고
+    패널로는 막히는(또는 그 반대) 어긋남이 생긴다.
+    """
+    if not isinstance(entry, dict):
+        raise InventoryError(f"{where}: 매핑이어야 합니다")
+    _check_keys(where, entry, _INVENTORY_KEYS, InventoryError)
+    return DeviceCredential(
+        device_id=_inventory_text(where, entry, "device_id"),
+        secret=_inventory_text(where, entry, "secret"),
+        site_id=_inventory_text(where, entry, "site_id"),
+        device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
+        facility_type=_inventory_enum(where, entry, "facility_type", FACILITY_TYPES),
+    )
 
 
 @dataclass(frozen=True)

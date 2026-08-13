@@ -86,6 +86,148 @@ def make_runner(device_ids, events=(), connector=None, seed: int = 1, **kwargs):
     return runner, connector
 
 
+# ---- 인벤토리 핫 리로드 -------------------------------------------------
+
+
+def entry(device_id: str, secret: str | None = None) -> str:
+    return (
+        f"  - device_id: {device_id}\n"
+        f"    secret: {secret or f'secret-{device_id}'}\n"
+        f"    site_id: S-1\n    device_type: FIXED\n    facility_type: OFFICE\n"
+    )
+
+
+def reload_runner(tmp_path, device_ids=("AQ-1",), **kwargs):
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices:\n" + "".join(entry(d) for d in device_ids), encoding="utf-8")
+    runner, connector = make_runner(list(device_ids), devices_file=str(path), **kwargs)
+    runner.start()
+    return runner, connector, path
+
+
+def test_reload_adds_new_devices(tmp_path):
+    runner, _, path = reload_runner(tmp_path)
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry("AQ-2"), encoding="utf-8")
+    result = runner.reload_inventory()
+
+    assert result.ok is True
+    assert result.added == ("AQ-2",)
+    assert runner.order == ["AQ-1", "AQ-2"]
+
+
+def test_newly_added_device_publishes_next_tick(tmp_path):
+    runner, connector, path = reload_runner(tmp_path)
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry("AQ-2"), encoding="utf-8")
+    runner.reload_inventory()
+    stats = runner.tick(TS, now=300.0)
+
+    assert stats.published == 2
+    assert "AQ-2" in connector.calls
+
+
+def test_reload_removes_and_disconnects_dropped_devices(tmp_path):
+    runner, connector, path = reload_runner(tmp_path, ("AQ-1", "AQ-2"))
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry("AQ-1"), encoding="utf-8")
+    result = runner.reload_inventory()
+
+    assert result.removed == ("AQ-2",)
+    assert runner.order == ["AQ-1"]
+    assert "AQ-2" not in runner.sessions
+    assert connector.publishers[1].disconnected is True
+
+
+def test_reload_swaps_a_changed_secret_without_dropping_the_connection(tmp_path):
+    """지금 붙어 있는 커넥션은 유효하다 — 다음 재접속 때 새 secret을 쓴다."""
+    runner, _, path = reload_runner(tmp_path)
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry("AQ-1", "rotated"), encoding="utf-8")
+    result = runner.reload_inventory()
+
+    assert result.rotated == ("AQ-1",)
+    assert runner.sessions["AQ-1"].credential.secret == "rotated"
+    assert runner.sessions["AQ-1"].device.credential.secret == "rotated"
+    assert runner.sessions["AQ-1"].connected is True  # 끊지 않았다
+
+
+def test_rotated_secret_re_enables_a_rejected_device(tmp_path):
+    """시크릿을 고쳐 넣었으면 재시작 없이 다시 시도할 기회를 줘야 한다."""
+    connector = FakeConnector(connect_failures=1, error=ApiError("거부", status=401))
+    runner, _, path = reload_runner(tmp_path, connector=connector)
+    runner.tick(TS, now=0.0)
+    assert runner.sessions["AQ-1"].disabled is True
+
+    path.write_text("devices:\n" + entry("AQ-1", "rotated"), encoding="utf-8")
+    runner.reload_inventory()
+
+    assert runner.sessions["AQ-1"].disabled is False
+    assert runner.tick(TS, now=10.0).published == 1
+
+
+def test_reload_keeps_fleet_when_file_is_broken(tmp_path):
+    """운영 중 오타 하나로 돌던 플릿이 죽으면 리로드 실패보다 훨씬 나쁘다."""
+    runner, _, path = reload_runner(tmp_path, ("AQ-1", "AQ-2"))
+
+    path.write_text("devices:\n  - device_id: 'unclosed\n", encoding="utf-8")
+    result = runner.reload_inventory()
+
+    assert result.ok is False
+    assert "YAML" in result.error
+    assert runner.order == ["AQ-1", "AQ-2"]
+
+
+def test_reload_keeps_fleet_when_file_is_missing(tmp_path):
+    runner, _, path = reload_runner(tmp_path)
+
+    path.unlink()
+    result = runner.reload_inventory()
+
+    assert result.ok is False
+    assert runner.order == ["AQ-1"]
+
+
+def test_reload_respects_scenario_exclude_and_max(tmp_path):
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices:\n" + entry("AQ-1"), encoding="utf-8")
+    runner, _ = make_runner(
+        ["AQ-1"], devices_file=str(path), scenario=scenario(exclude=["AQ-2"])
+    )
+    runner.start()
+
+    path.write_text(
+        "devices:\n" + entry("AQ-1") + entry("AQ-2") + entry("AQ-3"), encoding="utf-8"
+    )
+    runner.reload_inventory()
+
+    assert runner.order == ["AQ-1", "AQ-3"]  # AQ-2는 시나리오가 제외
+
+
+def test_reload_command_is_routed(tmp_path):
+    control_dir = tmp_path / "control"
+    runner, _, path = reload_runner(tmp_path, control_dir=str(control_dir))
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry("AQ-2"), encoding="utf-8")
+    control.write_command(control_dir, control.RELOAD)
+    runner.drain_control()
+
+    assert runner.order == ["AQ-1", "AQ-2"]
+
+
+def test_reload_without_devices_file_is_a_noop_failure():
+    runner, _ = make_runner(["AQ-1"])
+    runner.start()
+
+    result = runner.reload_inventory()
+
+    assert result.ok is False
+    assert runner.order == ["AQ-1"]
+
+
 # ---- 인벤토리 기반 선별 -------------------------------------------------
 
 

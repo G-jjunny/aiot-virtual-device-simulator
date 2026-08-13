@@ -26,9 +26,11 @@ from livesim.config import (
     DROPOUT,
     POWER_OFF,
     SILENCE,
+    ConfigError,
     DeviceCredential,
     Scenario,
     Settings,
+    load_inventory,
 )
 from livesim.device import LiveDevice, MqttPublisher, Publisher
 from livesim.scheduler import EventScheduler
@@ -79,6 +81,15 @@ class TickStats:
     disabled: int = 0
 
 
+@dataclass(frozen=True)
+class ReloadResult:
+    ok: bool
+    added: tuple[str, ...] = ()
+    removed: tuple[str, ...] = ()
+    rotated: tuple[str, ...] = ()
+    error: str = ""
+
+
 @dataclass
 class DeviceSession:
     """디바이스 1대의 커넥션 수명 관리.
@@ -106,12 +117,14 @@ class Runner:
         rng: random.Random | None = None,
         clock: Callable[[], float] = time.time,
         control_dir: str | None = None,
+        devices_file: str | None = None,
     ) -> None:
         self.scenario = scenario
         self.inventory = tuple(inventory)
         self.connect = connect
         self.clock = clock
         self.control_dir = control_dir
+        self.devices_file = devices_file
         self.scheduler = EventScheduler(
             scenario.events, scenario.interval_seconds, rng=rng
         )
@@ -267,6 +280,11 @@ class Runner:
         return len(commands)
 
     def _apply_command(self, command: control.Command) -> None:
+        if command.command == control.RELOAD:
+            # 플릿 전체 대상이라 device_id가 없다.
+            self.reload_inventory()
+            return
+
         session = self.sessions.get(command.device_id)
         if session is None:
             LOG.warning(
@@ -305,6 +323,63 @@ class Runner:
                 command.device_id, ALERT_BURST, now, seconds, self._burst_overrides()
             )
             LOG.info("[ctl] 오염 급증: %s (%s분)", command.device_id, command.minutes)
+
+    def reload_inventory(self) -> ReloadResult:
+        """devices.yaml을 다시 읽어 세션을 맞춘다 (추가/제거/시크릿 변경).
+
+        파일이 깨져 있으면 기존 인벤토리를 그대로 유지한다. 운영 중 오타 하나로
+        돌고 있는 플릿 전체가 죽는 것이 리로드 실패보다 훨씬 나쁘다.
+        """
+        if not self.devices_file:
+            return ReloadResult(ok=False, error="인벤토리 경로가 설정되지 않았습니다")
+        try:
+            inventory = load_inventory(self.devices_file)
+        except ConfigError as exc:
+            LOG.warning("인벤토리 리로드 거부 — 기존 %d대 유지: %s", len(self.order), exc)
+            return ReloadResult(ok=False, error=str(exc))
+
+        self.inventory = tuple(inventory)
+        selected = select_devices(inventory, self.scenario)
+        wanted = {item.device_id: item for item in selected}
+        current = set(self.sessions)
+
+        added = [device_id for device_id in wanted if device_id not in current]
+        removed = [device_id for device_id in current if device_id not in wanted]
+        rotated: list[str] = []
+
+        for device_id in removed:
+            session = self.sessions.pop(device_id)
+            self._disconnect(session)
+            self.scheduler.release(device_id)
+
+        for device_id, credential in wanted.items():
+            session = self.sessions.get(device_id)
+            if session is None:
+                self.sessions[device_id] = DeviceSession(credential)
+                continue
+            if session.credential == credential:
+                continue
+            # 시크릿·소속이 바뀌었다. 지금 붙어 있는 커넥션은 유효하므로 끊지 않고,
+            # 다음 재접속 때 새 값으로 토큰을 받게 자격증명만 바꿔 끼운다.
+            session.credential = credential
+            if session.device is not None:
+                session.device.credential = credential
+            if session.disabled:
+                # 거부됐던 디바이스는 새 시크릿으로 다시 시도할 기회를 준다.
+                session.disabled = False
+                session.disabled_reason = ""
+                session.next_attempt = 0.0
+                session.backoff = 0.0
+            rotated.append(device_id)
+
+        self.order = sorted(self.sessions)
+        LOG.info(
+            "인벤토리 리로드: 추가 %d, 제거 %d, 자격증명 변경 %d (총 %d대)",
+            len(added), len(removed), len(rotated), len(self.order),
+        )
+        return ReloadResult(
+            ok=True, added=tuple(added), removed=tuple(removed), rotated=tuple(rotated)
+        )
 
     def _burst_overrides(self) -> dict[str, float]:
         """시나리오의 alert_burst 목표값을 재사용하고, 없으면 내장 기본값."""
@@ -486,6 +561,7 @@ def run(
         inventory,
         make_connector(settings),
         control_dir=settings.control_dir,
+        devices_file=settings.devices_file,
     ).run(stop)
 
 
