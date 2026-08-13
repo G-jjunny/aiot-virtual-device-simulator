@@ -10,7 +10,7 @@ from typing import Any, Protocol
 
 import paho.mqtt.client as mqtt
 
-from livesim.api import DeviceRecord
+from livesim.config import DeviceCredential
 from livesim.payload import NO_OFFSET, apply_overrides, build_payload, build_topic
 
 LOG = logging.getLogger("livesim.device")
@@ -71,7 +71,7 @@ class MqttPublisher:
 class LiveDevice:
     """측정값을 만들어 자기 토픽으로 발행하는 디바이스 1대."""
 
-    record: DeviceRecord
+    credential: DeviceCredential
     publisher: Publisher
     online: bool = True
     captured_at_offset: str = NO_OFFSET
@@ -81,7 +81,7 @@ class LiveDevice:
 
     @property
     def device_id(self) -> str:
-        return self.record.device_id
+        return self.credential.device_id
 
     @property
     def pending(self) -> int:
@@ -138,20 +138,20 @@ class LiveDevice:
 
     def _build(self, ts: datetime, seed: int) -> dict[str, Any]:
         return build_payload(
-            self.record.device_id,
-            self.record.site_id,
-            self.record.device_type,
+            self.credential.device_id,
+            self.credential.site_id,
+            self.credential.device_type,
             ts,
-            facility_type=self.record.facility_type,
+            facility_type=self.credential.facility_type,
             seed=seed,
             captured_at_offset=self.captured_at_offset,
         )
 
     def topic(self, suffix: str) -> str:
         return build_topic(
-            self.record.facility_type,
-            self.record.site_id,
-            self.record.device_type,
-            self.record.device_id,
+            self.credential.facility_type,
+            self.credential.site_id,
+            self.credential.device_type,
+            self.credential.device_id,
             suffix,
         )

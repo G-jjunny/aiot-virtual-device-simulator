@@ -133,3 +133,74 @@ def test_no_events_means_no_activity():
     assert plan.started == ()
     assert plan.ended == ()
     assert plan.active == {}
+
+
+# ---- 수동 이벤트 -------------------------------------------------------
+
+
+def test_forced_event_is_marked_manual():
+    sched = scheduler([])
+
+    event = sched.force("a", "dropout", now=0.0, duration_seconds=300)
+
+    assert event.manual is True
+    assert event.ends_at == 300.0
+    assert sched.tick(["a"], now=0.0).active["a"].type == "dropout"
+
+
+def test_forced_event_without_duration_never_expires():
+    """전원 off는 사람이 켤 때까지 유지되어야 한다."""
+    sched = scheduler([])
+    sched.force("a", "power_off", now=0.0)
+
+    plan = sched.tick(["a"], now=10_000_000.0)
+
+    assert plan.ended == ()
+    assert plan.active["a"].type == "power_off"
+
+
+def test_manual_event_blocks_probability_events():
+    """수동으로 껐는데 확률 이벤트가 그 위에 얹히면 안 된다."""
+    sched = scheduler([spec()])  # 틱당 확률 1.0
+    sched.force("a", "power_off", now=0.0)
+
+    plan = sched.tick(["a", "b"], now=0.0)
+
+    assert plan.active["a"].type == "power_off"
+    assert plan.active["b"].type == "dropout"  # 수동이 없는 쪽은 정상 발생
+
+
+def test_force_overrides_a_running_probability_event():
+    sched = scheduler([spec(duration=(60.0, 60.0))])
+    sched.tick(["a"], now=0.0)
+
+    sched.force("a", "power_off", now=10.0)
+
+    assert sched.describe("a")[0] == "power_off"
+
+
+def test_release_clears_the_event():
+    sched = scheduler([])
+    sched.force("a", "power_off", now=0.0)
+
+    assert sched.release("a") is True
+    assert sched.is_active("a") is False
+    assert sched.release("a") is False
+
+
+def test_forced_burst_carries_noisy_overrides():
+    sched = scheduler([])
+
+    event = sched.force(
+        "a", "alert_burst", now=0.0, duration_seconds=600, overrides={"pm25": 100.0}
+    )
+
+    assert 90.0 <= event.overrides["pm25"] <= 110.0
+
+
+def test_describe_reports_type_and_manual_flag():
+    sched = scheduler([])
+    sched.force("a", "dropout", now=0.0, duration_seconds=120)
+
+    assert sched.describe("a") == ("dropout", 120.0, True)
+    assert sched.describe("nope") is None

@@ -4,17 +4,17 @@ from unittest.mock import patch
 
 import pytest
 
-from livesim.api import DeviceRecord
+from livesim.config import DeviceCredential
 from livesim.device import LiveDevice, MqttPublisher
 
 TS = datetime(2026, 7, 20, 14, 30, 0)
 
-RECORD = DeviceRecord(
+RECORD = DeviceCredential(
     device_id="AQ-CT-001",
-    device_type="FIXED",
+    secret="s3cr3t",
     site_id="S-1",
+    device_type="FIXED",
     facility_type="OFFICE",
-    status="ONLINE",
 )
 
 

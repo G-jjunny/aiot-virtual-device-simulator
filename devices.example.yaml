@@ -1,0 +1,30 @@
+# 디바이스 크리덴셜 인벤토리 예시.
+#
+# 이 파일을 devices.yaml로 복사해서 쓰세요. devices.yaml은 secret 평문을 담으므로
+# .gitignore에 등록되어 있습니다 — 절대 커밋하지 마세요.
+#
+# 값을 얻는 방법 (실물 디바이스의 "공장/설치 시 설정 주입"에 해당):
+#   1. FE 관리자 대시보드에서 사이트를 만들고 디바이스를 등록한다
+#   2. 디바이스 상세에서 시크릿을 발급받는다 (1회만 노출되는 다이얼로그)
+#   3. 그 자리에서 device_id / secret / site_id를 아래 형식으로 옮겨 적는다
+#
+# 시크릿을 잃어버리면 재발급받아야 합니다 (해시로만 저장되어 조회가 불가능).
+
+devices:
+  - device_id: AQ-GANGNAM-01
+    secret: "여기에-발급받은-시크릿"
+    site_id: "550e8400-e29b-41d4-a716-446655440000"
+    device_type: FIXED # FIXED | PORTABLE | WEARABLE
+    facility_type: OFFICE # OFFICE | SCHOOL | DAYCARE | WELFARE | HOME | HOME_ELDERLY
+
+  - device_id: AQ-GANGNAM-02
+    secret: "여기에-발급받은-시크릿"
+    site_id: "550e8400-e29b-41d4-a716-446655440000"
+    device_type: PORTABLE
+    facility_type: OFFICE
+
+  - device_id: WB-GANGNAM-01
+    secret: "여기에-발급받은-시크릿"
+    site_id: "550e8400-e29b-41d4-a716-446655440000"
+    device_type: WEARABLE
+    facility_type: OFFICE
