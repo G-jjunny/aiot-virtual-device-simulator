@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+
+# 로컬 실행용 자격증명 — 절대 커밋 금지
+.env
+.env.*
+!.env.example
