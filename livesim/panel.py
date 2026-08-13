@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import textwrap
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +63,9 @@ def public_inventory(devices_file: str | Path) -> list[dict[str, str]]:
 
 BACKUP_SUFFIX = ".bak"
 KEEP_BACKUPS = 10
+
+# 리스트 항목 줄의 들여쓰기 감지용. 주석(#)은 매치되지 않는다.
+_ITEM_INDENT = re.compile(r"^(\s*)-\s", re.MULTILINE)
 
 
 def _backup(path: Path) -> Path:
@@ -113,8 +117,17 @@ def append_device(devices_file: str | Path, entry: dict[str, Any]) -> str:
         default_flow_style=False,
     )
     original = path.read_text(encoding="utf-8")
+    # 새 항목의 들여쓰기는 기존 항목에서 감지해 그대로 따른다. 파일 출처에 따라
+    # 리스트 들여쓰기가 다르다 — safe_dump 산출물은 0칸(indentless), 예시 파일은
+    # 2칸. 하드코딩하면 어느 한쪽에서 문법이 깨진다 (실제로 운영 파일에서 깨졌다).
+    item_match = _ITEM_INDENT.search(original)
+    if item_match is None:
+        raise PanelError(
+            "기존 항목의 들여쓰기를 감지할 수 없습니다 — devices.yaml에 항목이 "
+            "하나도 없으면 첫 항목은 파일에 직접 추가한 뒤 리로드하세요."
+        )
     separator = "" if original.endswith("\n") else "\n"
-    candidate = original + separator + textwrap.indent(block, "  ")
+    candidate = original + separator + textwrap.indent(block, item_match.group(1))
 
     tmp = path.with_name(f".{path.name}.tmp")
     tmp.write_text(candidate, encoding="utf-8")

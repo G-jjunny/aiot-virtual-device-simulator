@@ -9,7 +9,7 @@ import requests
 import yaml
 
 from livesim import control
-from livesim.config import Settings, load_inventory
+from livesim.config import InventoryError, Settings, load_inventory
 from livesim.panel import PanelError, append_device, build_server
 
 INVENTORY = """
@@ -291,6 +291,39 @@ def test_append_handles_file_without_trailing_newline(tmp_path):
     append_device(path, NEW_DEVICE)
 
     assert [item.device_id for item in load_inventory(path)] == ["AQ-01", "AQ-99"]
+
+
+def test_append_matches_indentless_list(tmp_path):
+    """safe_dump 산출물(0칸 리스트)에 붙일 때 들여쓰기를 파일에 맞춰야 한다.
+
+    2026-08-13 운영 결함: 새 항목을 2칸으로 하드코딩해 provision 스크립트가
+    만든 indentless 파일에서 YAML 문법 오류가 났다. 들여쓰기는 감지한다.
+    """
+    path = tmp_path / "devices.yaml"
+    path.write_text(
+        "devices:\n- device_id: AQ-01\n  secret: s1\n"
+        "  site_id: S-1\n  device_type: FIXED\n  facility_type: OFFICE\n",
+        encoding="utf-8",
+    )
+
+    append_device(path, NEW_DEVICE)
+
+    assert [item.device_id for item in load_inventory(path)] == ["AQ-01", "AQ-99"]
+
+
+def test_append_rejects_file_without_items(tmp_path):
+    """빈 인벤토리는 로더가 먼저 거부한다 — 파일은 손대지 않은 채 남아야 한다.
+
+    (항목이 하나라도 있어야 로더를 통과하므로, append 단계의 들여쓰기 감지는
+    항상 기존 항목을 찾을 수 있다.)
+    """
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices: []\n", encoding="utf-8")
+
+    with pytest.raises(InventoryError):
+        append_device(path, NEW_DEVICE)
+
+    assert yaml.safe_load(path.read_text(encoding="utf-8")) == {"devices": []}
 
 
 def test_append_quotes_values_safely(tmp_path):
