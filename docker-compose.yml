@@ -27,3 +27,23 @@ services:
       options:
         max-size: "10m"
         max-file: "5"
+
+  livesim-panel:
+    build: .
+    container_name: livesim-panel
+    env_file: .env
+    command: ["panel", "--host", "0.0.0.0"]
+    restart: unless-stopped
+    # 127.0.0.1로만 매핑한다 — 패널에는 인증이 없으므로 호스트 밖으로 열면 안 된다.
+    ports:
+      - "127.0.0.1:8390:8390"
+    volumes:
+      # 패널은 기기 주입을 위해 쓰기 권한이 필요하다 (러너 쪽은 ro 유지).
+      - ./devices.yaml:/app/devices.yaml
+      # 러너와 같은 제어 채널을 봐야 명령/상태가 오간다.
+      - ./control:/app/control
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
