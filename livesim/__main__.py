@@ -165,7 +165,9 @@ def _print_status(control_dir: str) -> int:
         f"시나리오 {state.get('scenario')} · tick {state.get('tick')} · "
         f"갱신 {state.get('updated_at')}"
     )
-    header = f"{'DEVICE':<22} {'CONN':<6} {'ONLINE':<7} {'PEND':>5}  EVENT"
+    header = (
+        f"{'DEVICE':<22} {'TYPE':<6} {'CONN':<6} {'ONLINE':<7} {'PEND':>5}  EVENT"
+    )
     print(header)
     print("-" * len(header))
     for item in state.get("devices", []):
@@ -180,6 +182,7 @@ def _print_status(control_dir: str) -> int:
             event = f"비활성: {item.get('disabled_reason') or '알 수 없음'}"
         print(
             f"{item.get('device_id', '?'):<22} "
+            f"{control.abbreviate_type(item.get('device_type')):<6} "
             f"{'yes' if item.get('connected') else 'no':<6} "
             f"{'yes' if item.get('online') else 'no':<7} "
             f"{item.get('pending', 0):>5}  {event}"

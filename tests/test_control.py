@@ -158,3 +158,19 @@ def test_format_remaining_explains_the_wait_at_zero():
 
 def test_format_remaining_is_empty_without_an_event():
     assert control.format_remaining(None) == ""
+
+
+# ---- 유형 축약 ---------------------------------------------------------
+
+
+def test_abbreviate_type_fits_the_column():
+    assert control.abbreviate_type("FIXED") == "FIXED"
+    assert control.abbreviate_type("PORTABLE") == "PORT"
+    assert control.abbreviate_type("WEARABLE") == "WEAR"
+
+
+def test_abbreviate_type_handles_missing_and_unknown():
+    """구버전 러너가 쓴 state.json에는 device_type이 없다."""
+    assert control.abbreviate_type(None) == "-"
+    assert control.abbreviate_type("") == "-"
+    assert control.abbreviate_type("SATELLITE") == "SATEL"

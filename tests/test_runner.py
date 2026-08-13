@@ -562,6 +562,14 @@ def test_snapshot_marks_manual_events(tmp_path):
     assert device["event_ends_in"] == 300.0
 
 
+def test_snapshot_carries_device_type(tmp_path):
+    """패널이 인벤토리와 조인하지 않고 상태만으로 유형 필터를 그릴 수 있어야 한다."""
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    assert runner.snapshot()["devices"][0]["device_type"] == "FIXED"
+
+
 def test_snapshot_carries_absolute_end_time(tmp_path):
     """상대 잔여시간만 있으면 틱 사이(기본 5분) 내내 같은 값이 얼어붙는다."""
     runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))

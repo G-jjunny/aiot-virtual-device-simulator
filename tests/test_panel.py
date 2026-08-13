@@ -147,6 +147,39 @@ def test_page_explains_the_wait_after_zero(panel):
     assert "복구·재전송 대기(다음 틱)" in body  # dropout은 더 구체적으로
 
 
+def test_page_has_type_filter_tabs(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    for label in ("전체", "고정형", "이동형", "웨어러블"):
+        assert label in body, label
+    assert "renderTabs" in body
+    assert "selectType" in body
+
+
+def test_tab_selection_survives_re_render(panel):
+    """2초 폴링·1초 카운트다운이 카드를 다시 그린다.
+
+    선택을 DOM에서 읽으면 갱신마다 '전체'로 튕기므로 JS 변수에 둬야 한다.
+    """
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "let activeType" in body
+    assert "localStorage" in body          # 새로고침 후에도 유지
+    assert "livesim.panel.type" in body
+
+
+def test_tabs_filter_by_device_type(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "matchesType" in body
+    assert "filter(matchesType)" in body
+    # 구버전 상태(device_type 없음)는 '전체'에서만 보여야 한다.
+    assert "activeType==='ALL'" in body
+
+
 def test_unknown_route_is_404(panel):
     base, _ = panel
     assert requests.get(base + "/nope", timeout=5).status_code == 404

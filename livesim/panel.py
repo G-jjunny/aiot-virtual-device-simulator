@@ -355,13 +355,23 @@ border-color:var(--acc);color:#fff;font-weight:600}
 .err{color:var(--bad)}.good{color:var(--ok)}
 .empty{color:var(--dim);font-size:13px;padding:24px;text-align:center;
 border:1px dashed var(--line);border-radius:8px}
+.tabs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px;
+border-bottom:1px solid var(--line);padding-bottom:10px}
+.tab{background:transparent;border:1px solid var(--line);color:var(--dim);
+border-radius:99px;padding:5px 12px;font-size:12px}
+.tab:hover{color:var(--fg)}
+.tab.sel{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
+.tab .n{opacity:.75;margin-left:4px}
 </style></head><body>
 <header>
   <h1>livesim 패널</h1>
   <div class="sum" id="sum">불러오는 중...</div>
 </header>
 <main>
-  <section><div class="grid" id="grid"></div></section>
+  <section>
+    <div class="tabs" id="tabs"></div>
+    <div class="grid" id="grid"></div>
+  </section>
   <aside>
     <h2>새 가상 기기 주입</h2>
     <p>FE 관리자 화면에서 디바이스를 등록하고 발급받은 시크릿을 붙여넣으세요.
@@ -377,7 +387,7 @@ border:1px dashed var(--line);border-radius:8px}
 </main>
 <script>
 const $=s=>document.querySelector(s);
-let inv=[];
+let inv=[], lastState=null;
 
 async function api(path,opt){
   const r=await fetch(path,opt);
@@ -387,6 +397,35 @@ async function api(path,opt){
 }
 function esc(s){return String(s??'').replace(/[&<>"]/g,c=>
   ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
+
+// 유형 필터. 선택은 JS 변수에 두고 DOM에서 읽지 않는다 — 2초 폴링과 1초
+// 카운트다운이 카드를 다시 그리므로, DOM에 기대면 갱신마다 '전체'로 튕긴다.
+const TYPE_TABS=[['ALL','전체'],['FIXED','고정형'],['PORTABLE','이동형'],
+                 ['WEARABLE','웨어러블']];
+const TYPE_KEY='livesim.panel.type';
+let activeType='ALL';
+try{ const saved=localStorage.getItem(TYPE_KEY);
+     if(saved && TYPE_TABS.some(t=>t[0]===saved)) activeType=saved; }catch(e){}
+
+function matchesType(d){
+  if(activeType==='ALL') return true;
+  // device_type이 없는 구버전 상태 항목은 '전체'에서만 보인다.
+  return (d.device_type||'')===activeType;
+}
+function selectType(t){
+  activeType=t;
+  try{ localStorage.setItem(TYPE_KEY,t) }catch(e){}
+  if(lastState) render(lastState,inv);
+}
+function renderTabs(devs){
+  $('#tabs').innerHTML=TYPE_TABS.map(([key,label])=>{
+    const n=key==='ALL' ? devs.length
+      : devs.filter(d=>(d.device_type||'')===key).length;
+    return '<button class="tab'+(activeType===key?' sel':'')+
+      '" onclick="selectType(\\''+key+'\\')">'+label+
+      '<span class="n">'+n+'</span></button>';
+  }).join('');
+}
 
 function cls(d){
   if(d.disabled) return 'bad';
@@ -457,18 +496,26 @@ function render(state,invList){
       '</b> · 접속 <b>'+conn+'/'+devs.length+'</b> · 갱신 '+esc(state.updated_at)
     : '<span class="err">러너가 실행 중이 아닙니다</span> · 인벤토리 '+invList.length+'대';
 
-  const rows = running ? devs
-    : invList.map(i=>({device_id:i.device_id,connected:false,online:false,
-        pending:0,event:null,disabled:false}));
-  if(!rows.length){
+  // 러너가 없으면 인벤토리로 대신 그린다. 인벤토리에도 device_type이 있어
+  // 탭 필터는 두 경우 모두 동작한다.
+  const all = running ? devs
+    : invList.map(i=>({device_id:i.device_id,device_type:i.device_type,
+        connected:false,online:false,pending:0,event:null,disabled:false}));
+  renderTabs(all);
+  const rows = all.filter(matchesType);
+  if(!all.length){
     $('#grid').innerHTML='<div class="empty">등록된 기기가 없습니다. 오른쪽에서 주입하세요.</div>';
+    return;
+  }
+  if(!rows.length){
+    $('#grid').innerHTML='<div class="empty">이 유형의 기기가 없습니다.</div>';
     return;
   }
   $('#grid').innerHTML=rows.map(d=>{
     const info=inv.find(i=>i.device_id===d.device_id)||{};
     return '<div class="card '+cls(d)+'">'+
       '<div class="did">'+esc(d.device_id)+'</div>'+
-      '<div class="meta">'+esc(info.device_type||'')+
+      '<div class="meta">'+esc(d.device_type||info.device_type||'')+
         (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
       '<div>'+badges(d)+'</div>'+
       '<div class="btns">'+
@@ -487,6 +534,7 @@ async function refresh(){
     // 응답마다 찍힌 서버 시각으로 시계를 다시 맞춘다 (written_at은 낡았다).
     syncClock(s.server_now);
     inv=i.devices||[];
+    lastState=s;   // 탭을 바꿀 때 폴링을 기다리지 않고 바로 다시 그리기 위해
     render(s,inv);
   }catch(e){ $('#sum').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
 }
@@ -507,6 +555,7 @@ $('#inject').onclick=async()=>{
 };
 
 window.cmd=cmd;
+window.selectType=selectType;   // 카드/탭의 인라인 onclick에서 부른다
 refresh();
 setInterval(refresh,2000);        // 데이터 폴링
 setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재렌더 없음)

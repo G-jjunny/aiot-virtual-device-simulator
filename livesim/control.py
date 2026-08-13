@@ -136,6 +136,19 @@ def remaining_seconds(device: dict[str, Any], now: float | None = None) -> float
     return None if frozen is None else float(frozen)
 
 
+TYPE_ABBREV = {"FIXED": "FIXED", "PORTABLE": "PORT", "WEARABLE": "WEAR"}
+
+
+def abbreviate_type(device_type: str | None) -> str:
+    """상태 표의 좁은 컬럼에 맞춘 축약. 모르는 값은 앞 5글자만 남긴다.
+
+    구버전 러너가 쓴 state.json에는 device_type이 없으므로 '-'로 표시한다.
+    """
+    if not device_type:
+        return "-"
+    return TYPE_ABBREV.get(device_type.upper(), device_type.upper()[:5])
+
+
 def format_remaining(seconds: float | None) -> str:
     """mm:ss. 0 이하는 '종료 대기' — 스케줄러는 틱 경계에서만 이벤트를 걷는다."""
     if seconds is None:

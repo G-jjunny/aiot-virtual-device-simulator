@@ -402,6 +402,9 @@ class Runner:
             finite = ends_at is not None and ends_at != float("inf")
             devices.append({
                 "device_id": device_id,
+                # 패널이 인벤토리와 조인하지 않고 상태만으로 유형별 필터를
+                # 그릴 수 있게 한다 (두 응답의 타이밍이 어긋나면 조인이 샌다).
+                "device_type": session.credential.device_type,
                 "connected": session.connected,
                 "online": session.device.online if session.device else False,
                 "pending": session.device.pending if session.device else 0,
