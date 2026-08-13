@@ -9,6 +9,11 @@ services:
     # (.env에 API_BASE_URL=http://host.docker.internal:8080 형태로 지정).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      # 디바이스 자격증명은 이미지가 아니라 볼륨으로 주입한다 (읽기 전용).
+      - ./devices.yaml:/app/devices.yaml:ro
+      # 제어 채널. 호스트에서 `livesim ctl`을 쓰려면 이 디렉터리를 공유해야 한다.
+      - ./control:/app/control
     # dry-run은 접속 없이 시나리오만 검증한다. 프로세스가 살아 있고 시나리오가
     # 여전히 유효한지 확인하는 용도이며, 발행 성공 여부는 보지 않는다.
     healthcheck:

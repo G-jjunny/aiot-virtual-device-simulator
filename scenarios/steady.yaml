@@ -2,11 +2,9 @@ name: steady
 description: 기본 시나리오 — 전 디바이스가 5분 주기로 정상 발행, 이벤트 없음
 interval_seconds: 300
 max_devices: 0
-# 시드에서 의도적으로 OFFLINE인 디바이스. 발행하면 백엔드 트리거가 ONLINE으로
-# 되살려 "일부 디바이스는 꺼져 있다"는 시드 상태가 사라진다.
-# testDevice는 수동 API 테스트 잔재 — 시뮬레이션 대상이 아니다.
-exclude_devices:
-  - AQ-SONGPA-02
-  - AQ-SONGPA-03
-  - testDevice
+# devices.yaml에 있지만 이번 실행에서는 빼둘 device_id.
+# 자격증명을 지우지 않고 일시적으로 재우는 용도다 (인벤토리를 편집하면 나중에
+# secret을 다시 발급받아야 하므로, 잠깐 빼는 것은 여기서 한다).
+# 실행 중 개별 조작은 `livesim ctl off <device_id>`를 쓴다.
+exclude_devices: []
 events: []
