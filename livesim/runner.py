@@ -276,6 +276,9 @@ class Runner:
         for command in commands:
             self._apply_command(command)
         if commands:
+            # 명령은 1초 폴링으로 즉시 반영되는데 상태 기록이 다음 틱이면,
+            # 버튼을 눌러도 최대 한 틱(기본 5분) 동안 화면이 그대로다.
+            # 반대로 명령이 없을 때까지 쓰면 1초마다 디스크를 두드리게 된다.
             self._publish_state()
         return len(commands)
 
@@ -396,9 +399,7 @@ class Runner:
             session = self.sessions[device_id]
             described = self.scheduler.describe(device_id)
             event_type, ends_at, manual = described or (None, None, False)
-            remaining = None
-            if ends_at is not None and ends_at != float("inf"):
-                remaining = round(max(0.0, ends_at - now), 1)
+            finite = ends_at is not None and ends_at != float("inf")
             devices.append({
                 "device_id": device_id,
                 "connected": session.connected,
@@ -406,12 +407,19 @@ class Runner:
                 "pending": session.device.pending if session.device else 0,
                 "event": event_type,
                 "event_manual": manual,
-                "event_ends_in": remaining,
+                # 기록 순간의 잔여 시간. 이 파일은 틱마다(기본 5분) 갱신되므로
+                # 그동안 값이 얼어붙는다 — 하위 호환용으로만 남긴다.
+                "event_ends_in": round(max(0.0, ends_at - now), 1) if finite else None,
+                # 절대 종료시각. 읽는 쪽이 '지금' 기준으로 다시 계산할 수 있어야
+                # 갱신 주기와 무관하게 카운트다운이 흐른다.
+                "event_ends_at": float(ends_at) if finite else None,
                 "disabled": session.disabled,
                 "disabled_reason": session.disabled_reason,
             })
         return {
             "updated_at": kst_now().isoformat(),
+            # 기록 시점의 epoch. 클라이언트가 자기 시계와의 차이를 보정하는 기준.
+            "written_at": now,
             "tick": self.tick_index,
             "scenario": self.scenario.name,
             "interval_seconds": self.scenario.interval_seconds,

@@ -562,6 +562,56 @@ def test_snapshot_marks_manual_events(tmp_path):
     assert device["event_ends_in"] == 300.0
 
 
+def test_snapshot_carries_absolute_end_time(tmp_path):
+    """상대 잔여시간만 있으면 틱 사이(기본 5분) 내내 같은 값이 얼어붙는다."""
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    control.write_command(tmp_path, control.DROPOUT, "AQ-1", minutes=5)
+    runner.drain_control()
+    device = runner.snapshot()["devices"][0]
+
+    assert device["event_ends_at"] == 300.0  # clock()=0.0 기준 절대 종료시각
+
+
+def test_snapshot_reports_when_it_was_written(tmp_path):
+    """클라이언트가 자기 시계와의 차이를 보정하려면 기록 시각이 필요하다."""
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    assert runner.snapshot()["written_at"] == 0.0  # 주입한 clock 값
+
+
+def test_indefinite_event_has_no_absolute_end_time(tmp_path):
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    control.write_command(tmp_path, control.OFF, "AQ-1")
+    runner.drain_control()
+
+    assert runner.snapshot()["devices"][0]["event_ends_at"] is None
+
+
+def test_state_is_written_immediately_after_a_command(tmp_path):
+    """명령은 1초 폴링으로 즉시 반영되는데 기록이 다음 틱이면 화면이 안 바뀐다."""
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    control.write_command(tmp_path, control.DROPOUT, "AQ-1", minutes=5)
+    runner.drain_control()
+
+    assert control.read_state(tmp_path)["devices"][0]["event"] == "dropout"
+
+
+def test_no_commands_means_no_state_write(tmp_path):
+    """1초마다 무조건 쓰면 아무 일도 없는데 디스크만 두드린다."""
+    runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    assert runner.drain_control() == 0
+    assert not (tmp_path / control.STATE_FILE).exists()
+
+
 def test_power_off_has_no_end_time(tmp_path):
     """사람이 켤 때까지 유지되므로 남은 시간이라는 개념이 없다."""
     runner, _ = make_runner(["AQ-1"], control_dir=str(tmp_path))

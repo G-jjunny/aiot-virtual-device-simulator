@@ -157,8 +157,13 @@ def read_state(control_dir: str | Path) -> dict[str, Any]:
     try:
         state = control.read_state(control_dir)
     except control.ControlError as exc:
-        return {"running": False, "reason": str(exc)}
+        return {"running": False, "reason": str(exc), "server_now": time.time()}
     state["running"] = True
+    # 응답을 만드는 '지금'의 서버 시각. state.json의 written_at은 마지막 틱
+    # 시점이라 최대 한 틱(기본 5분) 낡았고, 그걸로 시계를 맞추면 카운트다운이
+    # 딱 그만큼 부풀어 오른다. 패널은 러너와 같은 호스트에서 도므로 이 값이
+    # 러너의 현재 시각과 같다.
+    state["server_now"] = time.time()
     return state
 
 
@@ -389,6 +394,35 @@ function cls(d){
   if(d.event==='dropout'||!d.online) return 'drop';
   return d.connected?'on':'offp';
 }
+// 서버와 브라우저의 시계 차이.
+//
+// 기준은 응답마다 새로 찍히는 server_now다. state.json의 written_at은 마지막
+// 틱 시점이라 최대 한 틱(기본 5분) 낡았고, 그걸로 맞추면 카운트다운이 그만큼
+// 부풀거나(첫 로드) 폴링마다 되돌아가 얼어붙는다.
+let clockOffset=0;
+function syncClock(serverEpoch){
+  if(serverEpoch!=null) clockOffset=Date.now()/1000-serverEpoch;
+}
+function serverNow(){return Date.now()/1000-clockOffset}
+
+function fmtLeft(sec){
+  const m=Math.floor(sec/60), s=Math.floor(sec%60);
+  return String(m).padStart(2,'0')+':'+String(s).padStart(2,'0')+' 남음';
+}
+// 스케줄러는 틱 경계에서만 이벤트를 걷는다. 0이 되어도 배지가 바로 사라지지
+// 않는 것이 정상이므로, 그 사이를 '대기'로 설명해 준다.
+function waitingText(event){
+  return event==='dropout' ? '복구·재전송 대기(다음 틱)' : '종료 대기(다음 틱)';
+}
+
+function tickCountdowns(){
+  document.querySelectorAll('[data-ends]').forEach(el=>{
+    const left=parseFloat(el.dataset.ends)-serverNow();
+    if(left>0){ el.textContent=fmtLeft(left); el.className='badge'; }
+    else { el.textContent=el.dataset.waiting; el.className='badge w'; }
+  });
+}
+
 function badges(d){
   let h='';
   if(d.disabled) h+='<span class="badge r">비활성</span>';
@@ -396,7 +430,11 @@ function badges(d){
     (d.event_manual?' 수동':'')+'</span>';
   else if(d.connected&&d.online) h+='<span class="badge g">정상</span>';
   if(d.pending>0) h+='<span class="badge">버퍼 '+d.pending+'</span>';
-  if(d.event_ends_in!=null) h+='<span class="badge">'+Math.round(d.event_ends_in)+'초</span>';
+  if(d.event_ends_at!=null)
+    h+='<span class="badge" data-ends="'+d.event_ends_at+'" data-waiting="'+
+       esc(waitingText(d.event))+'"></span>';
+  else if(d.event_ends_in!=null)  // 구버전 러너의 state.json 대비
+    h+='<span class="badge">'+Math.round(d.event_ends_in)+'초</span>';
   return h;
 }
 
@@ -440,11 +478,14 @@ function render(state,invList){
         '<button onclick="cmd(\\'burst\\',\\''+esc(d.device_id)+'\\',10)">버스트 10분</button>'+
       '</div></div>';
   }).join('');
+  tickCountdowns();   // 새로 그린 배지에 즉시 숫자를 채운다
 }
 
 async function refresh(){
   try{
     const [s,i]=await Promise.all([api('/api/state'),api('/api/inventory')]);
+    // 응답마다 찍힌 서버 시각으로 시계를 다시 맞춘다 (written_at은 낡았다).
+    syncClock(s.server_now);
     inv=i.devices||[];
     render(s,inv);
   }catch(e){ $('#sum').innerHTML='<span class="err">'+esc(e.message)+'</span>'; }
@@ -467,7 +508,8 @@ $('#inject').onclick=async()=>{
 
 window.cmd=cmd;
 refresh();
-setInterval(refresh,2000);
+setInterval(refresh,2000);        // 데이터 폴링
+setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재렌더 없음)
 </script></body></html>
 """
     .replace(

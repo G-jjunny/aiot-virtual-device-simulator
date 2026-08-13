@@ -74,6 +74,79 @@ def test_page_has_no_external_references(panel):
         assert marker not in body, marker
 
 
+def test_page_corrects_for_clock_skew(panel):
+    """서버가 적은 잔여값을 그대로 쓰면 브라우저 시계가 어긋날 때 틀어진다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "clockOffset" in body
+    assert "syncClock(s.server_now)" in body
+
+
+def test_page_does_not_use_written_at_as_the_time_base(panel):
+    """회귀 방지: written_at으로 시계를 맞추면 카운트다운이 멈추거나 부풀었다.
+
+    폴링마다 다시 맞추면 serverNow()가 늘 written_at으로 되돌아가 얼어붙고,
+    한 번만 맞추면 그 파일이 낡은 만큼(최대 한 틱=5분) 남은시간이 부풀었다.
+    실제로 두 번 다 브라우저에서 확인된 버그다.
+    """
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "syncClock(s.written_at)" not in body
+    assert "Date.now()/1000-s.written_at" not in body
+
+
+def test_state_stamps_a_fresh_server_clock(panel):
+    """written_at은 마지막 틱 시점이라 최대 한 틱(기본 5분) 낡았다.
+
+    그걸 시계 기준으로 쓰면 갓 연 패널이 남은시간을 그만큼 부풀려 보여준다.
+    """
+    base, env = panel
+    control.write_state(env.control_dir, {"tick": 1, "written_at": 1000.0,
+                                          "devices": []})
+
+    body = requests.get(base + "/api/state", timeout=5).json()
+
+    assert body["written_at"] == 1000.0          # 러너가 적은 값은 그대로 전달
+    assert body["server_now"] > 1_700_000_000    # 응답 시점의 실제 시각
+    assert body["server_now"] != body["written_at"]
+
+
+def test_server_now_is_present_even_without_a_runner(panel):
+    base, _ = panel
+    body = requests.get(base + "/api/state", timeout=5).json()
+
+    assert body["running"] is False
+    assert "server_now" in body
+
+
+def test_page_counts_down_every_second_separately_from_polling(panel):
+    """데이터는 2초 폴링이지만 남은시간은 매초 다시 계산해야 흐른다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "setInterval(tickCountdowns,1000)" in body
+    assert "setInterval(refresh,2000)" in body
+
+
+def test_page_uses_absolute_end_time_for_countdown(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "event_ends_at" in body
+    assert "data-ends" in body
+
+
+def test_page_explains_the_wait_after_zero(panel):
+    """0이 되어도 스케줄러가 틱 경계에서 걷을 때까지 배지가 남는다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "종료 대기(다음 틱)" in body
+    assert "복구·재전송 대기(다음 틱)" in body  # dropout은 더 구체적으로
+
+
 def test_unknown_route_is_404(panel):
     base, _ = panel
     assert requests.get(base + "/nope", timeout=5).status_code == 404

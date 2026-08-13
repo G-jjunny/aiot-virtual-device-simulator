@@ -172,8 +172,10 @@ def _print_status(control_dir: str) -> int:
         event = item.get("event") or "-"
         if item.get("event_manual"):
             event += " (수동)"
-        if item.get("event_ends_in") is not None:
-            event += f" {item['event_ends_in']:.0f}초 남음"
+        # 기록 시점 값이 아니라 출력하는 지금 기준으로 다시 계산한다.
+        countdown = control.format_remaining(control.remaining_seconds(item))
+        if countdown:
+            event += f" {countdown}"
         if item.get("disabled"):
             event = f"비활성: {item.get('disabled_reason') or '알 수 없음'}"
         print(

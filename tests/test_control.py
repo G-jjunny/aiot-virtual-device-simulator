@@ -118,3 +118,43 @@ def test_state_write_creates_directory(tmp_path):
     control.write_state(target, {"tick": 0})
 
     assert (target / control.STATE_FILE).exists()
+
+
+# ---- 남은시간 계산 -----------------------------------------------------
+
+
+def test_remaining_is_recomputed_from_absolute_end_time():
+    """state.json이 5분 전에 쓰였어도 지금 기준 잔여가 나와야 한다."""
+    device = {"event_ends_at": 1000.0, "event_ends_in": 300.0}
+
+    assert control.remaining_seconds(device, now=800.0) == 200.0
+    assert control.remaining_seconds(device, now=950.0) == 50.0
+
+
+def test_remaining_never_goes_negative():
+    assert control.remaining_seconds({"event_ends_at": 1000.0}, now=1200.0) == 0.0
+
+
+def test_remaining_falls_back_to_frozen_value():
+    """구버전 러너가 쓴 state.json에는 절대 종료시각이 없다."""
+    assert control.remaining_seconds({"event_ends_in": 42.0}, now=999.0) == 42.0
+
+
+def test_remaining_is_none_without_an_event():
+    assert control.remaining_seconds({}, now=1.0) is None
+    assert control.remaining_seconds({"event_ends_in": None}, now=1.0) is None
+
+
+def test_format_remaining_uses_mmss():
+    assert control.format_remaining(125.0) == "02:05 남음"
+    assert control.format_remaining(59.9) == "00:59 남음"
+
+
+def test_format_remaining_explains_the_wait_at_zero():
+    """스케줄러는 틱 경계에서만 이벤트를 걷는다 — 0이어도 바로 안 사라진다."""
+    assert "다음 틱" in control.format_remaining(0.0)
+    assert "다음 틱" in control.format_remaining(-5.0)
+
+
+def test_format_remaining_is_empty_without_an_event():
+    assert control.format_remaining(None) == ""

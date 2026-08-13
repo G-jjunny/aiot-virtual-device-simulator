@@ -121,6 +121,31 @@ def write_state(control_dir: str | Path, state: dict[str, Any]) -> Path:
     return path
 
 
+def remaining_seconds(device: dict[str, Any], now: float | None = None) -> float | None:
+    """이 디바이스 이벤트의 '지금' 기준 남은 시간. 없으면 None.
+
+    state.json의 event_ends_in은 기록 순간의 값이라 다음 틱(기본 5분)까지
+    얼어붙는다. 절대 종료시각(event_ends_at)이 있으면 그걸로 다시 계산해야
+    읽는 시점의 실제 잔여 시간이 나온다.
+    """
+    ends_at = device.get("event_ends_at")
+    if ends_at is not None:
+        current = time.time() if now is None else now
+        return max(0.0, float(ends_at) - current)
+    frozen = device.get("event_ends_in")
+    return None if frozen is None else float(frozen)
+
+
+def format_remaining(seconds: float | None) -> str:
+    """mm:ss. 0 이하는 '종료 대기' — 스케줄러는 틱 경계에서만 이벤트를 걷는다."""
+    if seconds is None:
+        return ""
+    if seconds <= 0:
+        return "종료 대기(다음 틱)"
+    minutes, secs = divmod(int(seconds), 60)
+    return f"{minutes:02d}:{secs:02d} 남음"
+
+
 def read_state(control_dir: str | Path) -> dict[str, Any]:
     path = Path(control_dir) / STATE_FILE
     if not path.is_file():
