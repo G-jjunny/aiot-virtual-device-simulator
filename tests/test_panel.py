@@ -323,6 +323,57 @@ def test_inject_response_does_not_echo_the_secret(panel):
     assert "fresh-secret" not in res.text
 
 
+def test_inject_records_power_off(panel):
+    """FE에서 offline인 기기를 발행 없이 등재만 해두는 경로."""
+    base, env = panel
+    res = requests.post(
+        base + "/api/inventory", json=dict(NEW_DEVICE, power="off"), timeout=5
+    )
+
+    assert res.status_code == 201
+    injected = load_inventory(env.devices_file)[-1]
+    assert injected.device_id == "AQ-99"
+    assert injected.starts_powered_off is True
+
+
+def test_inject_defaults_to_power_on(panel):
+    base, env = panel
+    requests.post(base + "/api/inventory", json=NEW_DEVICE, timeout=5)
+
+    assert load_inventory(env.devices_file)[-1].power == "on"
+
+
+def test_inventory_response_exposes_power(panel):
+    base, _ = panel
+    requests.post(
+        base + "/api/inventory", json=dict(NEW_DEVICE, power="off"), timeout=5
+    )
+
+    devices = requests.get(base + "/api/inventory", timeout=5).json()["devices"]
+
+    assert devices[-1]["power"] == "off"
+    assert devices[0]["power"] == "on"
+    assert "secret" not in devices[-1]
+
+
+def test_page_has_power_off_checkbox(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "전원 off로 주입" in body
+    assert 'id="f_off"' in body
+    assert "checked?'off':'on'" in body
+
+
+def test_summary_reports_powered_off_count(panel):
+    """꺼둔 기기 때문에 접속 수가 모자라 보이는 것을 설명해야 한다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "전원off" in body
+    assert "d.event==='power_off'" in body
+
+
 def test_inject_rejects_duplicate_device_id(panel):
     base, env = panel
     duplicate = dict(NEW_DEVICE, device_id="AQ-01")

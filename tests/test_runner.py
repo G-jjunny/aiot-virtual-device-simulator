@@ -6,7 +6,7 @@ import pytest
 
 from livesim import control
 from livesim.api import ApiError
-from livesim.config import DeviceCredential, EventSpec, Scenario
+from livesim.config import DeviceCredential, EventSpec, Scenario, load_inventory
 from livesim.runner import Runner, RunnerError, kst_now, select_devices
 
 TS = datetime(2026, 7, 20, 14, 30, 0)
@@ -103,6 +103,94 @@ def reload_runner(tmp_path, device_ids=("AQ-1",), **kwargs):
     runner, connector = make_runner(list(device_ids), devices_file=str(path), **kwargs)
     runner.start()
     return runner, connector, path
+
+
+def entry_off(device_id: str) -> str:
+    return entry(device_id) + "    power: 'off'\n"
+
+
+def power_runner(tmp_path, body: str, **kwargs):
+    """인벤토리 파일에서 직접 만든 러너 (power 필드를 태우기 위해)."""
+    path = tmp_path / "devices.yaml"
+    path.write_text("devices:\n" + body, encoding="utf-8")
+    connector = kwargs.pop("connector", None) or FakeConnector()
+    runner = Runner(
+        kwargs.pop("scenario", None) or scenario(),
+        load_inventory(path),
+        connector,
+        rng=random.Random(1),
+        clock=lambda: 0.0,
+        devices_file=str(path),
+        **kwargs,
+    )
+    runner.start()
+    return runner, connector, path
+
+
+def test_power_off_device_never_connects(tmp_path):
+    """발행을 시작하면 백엔드 트리거가 그 기기를 online으로 되살린다.
+
+    실제로 offline·정비중인 기기는 꺼진 채로 등재해야 서버 상태가 보존된다.
+    """
+    runner, connector, _ = power_runner(tmp_path, entry_off("AQ-1") + entry("AQ-2"))
+
+    stats = runner.tick(TS, now=0.0)
+
+    assert stats.powered_off == 1
+    assert stats.published == 1
+    assert stats.buffered == 0          # 꺼진 기기는 버퍼링도 하지 않는다
+    assert connector.calls == ["AQ-2"]  # 접속 시도조차 없음
+
+
+def test_power_off_device_appears_in_state(tmp_path):
+    runner, _, _ = power_runner(
+        tmp_path, entry_off("AQ-1"), control_dir=str(tmp_path / "ctl")
+    )
+
+    device = runner.snapshot()["devices"][0]
+
+    assert device["device_id"] == "AQ-1"
+    assert device["event"] == "power_off"
+    assert device["event_manual"] is True
+    assert device["connected"] is False
+
+
+def test_ctl_on_starts_a_power_off_device(tmp_path):
+    """등재만 해둔 기기를 필요할 때 켜는 것이 이 기능의 목적이다."""
+    control_dir = tmp_path / "ctl"
+    runner, _, _ = power_runner(
+        tmp_path, entry_off("AQ-1"), control_dir=str(control_dir)
+    )
+    assert runner.tick(TS, now=0.0).powered_off == 1
+
+    control.write_command(control_dir, control.ON, "AQ-1")
+    runner.drain_control()
+
+    assert runner.tick(TS, now=300.0).published == 1
+
+
+def test_reload_added_device_honours_power_off(tmp_path):
+    runner, connector, path = power_runner(tmp_path, entry("AQ-1"))
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry_off("AQ-2"), encoding="utf-8")
+    runner.reload_inventory()
+    stats = runner.tick(TS, now=300.0)
+
+    assert stats.powered_off == 1
+    assert "AQ-2" not in connector.calls
+
+
+def test_reload_does_not_re_power_off_a_running_device(tmp_path):
+    """등재 뒤의 전원은 ctl/패널이 소유한다 — 리로드가 켜둔 기기를 끄면 안 된다."""
+    runner, _, path = power_runner(tmp_path, entry("AQ-1"))
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry_off("AQ-1"), encoding="utf-8")
+    runner.reload_inventory()
+
+    assert runner.tick(TS, now=300.0).published == 1
+    assert runner.scheduler.describe("AQ-1") is None
 
 
 def test_reload_adds_new_devices(tmp_path):

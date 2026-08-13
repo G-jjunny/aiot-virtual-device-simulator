@@ -145,7 +145,23 @@ class Runner:
             item.device_id: DeviceSession(item) for item in selected
         }
         self.order = [item.device_id for item in selected]
+        for item in selected:
+            self._apply_initial_power(item)
         return selected
+
+    def _apply_initial_power(self, credential: DeviceCredential) -> None:
+        """인벤토리의 power: off를 수동 전원차단과 같은 상태로 걸어둔다.
+
+        새 상태 개념을 만들지 않는 것이 핵심이다 — 켜는 경로(`ctl on`), 화면 표시,
+        확률 이벤트 억제가 전부 기존 power_off 처리에 이미 들어 있다.
+
+        발행을 시작하면 백엔드 트리거가 그 기기를 online으로 되살리므로, 실제로
+        offline·정비중인 기기는 꺼진 채로 등재해야 서버 쪽 상태가 보존된다.
+        """
+        if not credential.starts_powered_off:
+            return
+        self.scheduler.force(credential.device_id, POWER_OFF, self.clock())
+        LOG.info("전원 off 상태로 등재: %s (ctl on으로 기동)", credential.device_id)
 
     # ---- 실행 -----------------------------------------------------------
 
@@ -359,6 +375,9 @@ class Runner:
             session = self.sessions.get(device_id)
             if session is None:
                 self.sessions[device_id] = DeviceSession(credential)
+                # 처음 등재되는 기기에만 파일의 초기 전원을 적용한다. 이미 돌고
+                # 있는 기기까지 적용하면 리로드가 사람이 켜둔 기기를 다시 끈다.
+                self._apply_initial_power(credential)
                 continue
             if session.credential == credential:
                 continue

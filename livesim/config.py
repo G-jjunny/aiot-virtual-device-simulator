@@ -44,6 +44,12 @@ POWER_OFF = "power_off"
 다시 켤 때까지 유지되어야 하므로 스케줄에 섞지 않는다.
 """
 
+POWER_ON = "on"
+POWER_OFF_INITIAL = "off"
+POWER_STATES = (POWER_ON, POWER_OFF_INITIAL)
+"""인벤토리의 초기 전원 상태 값. 이벤트 이름 POWER_OFF와는 다른 축이다 —
+이쪽은 파일에 적는 시작 조건, 저쪽은 러너가 들고 있는 런타임 상태."""
+
 MIN_INTERVAL_SECONDS = 1
 SECONDS_PER_DAY = 86400
 
@@ -248,10 +254,21 @@ class DeviceCredential:
     site_id: str
     device_type: str
     facility_type: str
+    power: str = POWER_ON
+    """**초기** 전원 상태. 러너가 이 기기를 처음 등재할 때만 적용된다.
+
+    등재된 뒤의 전원은 ctl/패널이 소유하므로, 파일의 power를 나중에 고쳐도
+    이미 돌고 있는 기기에는 영향이 없다 (반대였다면 리로드가 사람이 켜둔
+    기기를 말없이 다시 꺼버린다).
+    """
+
+    @property
+    def starts_powered_off(self) -> bool:
+        return self.power == POWER_OFF_INITIAL
 
 
 _INVENTORY_KEYS = {
-    "device_id", "secret", "site_id", "device_type", "facility_type",
+    "device_id", "secret", "site_id", "device_type", "facility_type", "power",
 }
 
 
@@ -341,12 +358,23 @@ def parse_credential(where: str, entry: Any) -> DeviceCredential:
     if not isinstance(entry, dict):
         raise InventoryError(f"{where}: 매핑이어야 합니다")
     _check_keys(where, entry, _INVENTORY_KEYS, InventoryError)
+    power = entry.get("power", POWER_ON)
+    if isinstance(power, bool):
+        # YAML 1.1은 따옴표 없는 on/off를 불리언으로 읽는다. `power: off`가
+        # 사람이 자연스럽게 쓰는 형태이므로 거부하지 않고 문자열로 되돌린다.
+        power = POWER_ON if power else POWER_OFF_INITIAL
+    if not isinstance(power, str) or power.strip().lower() not in POWER_STATES:
+        raise InventoryError(
+            f"{where}.power: {POWER_STATES} 중 하나여야 합니다 (받은 값: {power!r})"
+        )
+
     return DeviceCredential(
         device_id=_inventory_text(where, entry, "device_id"),
         secret=_inventory_text(where, entry, "secret"),
         site_id=_inventory_text(where, entry, "site_id"),
         device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
         facility_type=_inventory_enum(where, entry, "facility_type", FACILITY_TYPES),
+        power=power.strip().lower(),
     )
 
 

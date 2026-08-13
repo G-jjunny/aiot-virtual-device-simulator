@@ -1,4 +1,5 @@
 import textwrap
+from pathlib import Path
 
 import pytest
 
@@ -314,6 +315,62 @@ def test_rejects_empty_device_list(tmp_path):
 def test_rejects_non_mapping_inventory(tmp_path):
     with pytest.raises(InventoryError, match="매핑"):
         load_inventory(write_inventory(tmp_path, "- AQ-01\n"))
+
+
+# ---- 초기 전원 상태 -----------------------------------------------------
+
+
+def with_power(value: str) -> str:
+    return VALID_INVENTORY.replace(
+        "    facility_type: OFFICE",
+        f"    facility_type: OFFICE\n    power: {value}",
+        1,
+    )
+
+
+def test_power_defaults_to_on(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, VALID_INVENTORY))
+
+    assert inventory[0].power == "on"
+    assert inventory[0].starts_powered_off is False
+
+
+def test_power_off_is_parsed(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, with_power("'off'")))
+
+    assert inventory[0].power == "off"
+    assert inventory[0].starts_powered_off is True
+
+
+def test_bare_yaml_off_is_accepted_as_a_string(tmp_path):
+    """YAML 1.1은 따옴표 없는 off를 불리언으로 읽는다.
+
+    `power: off`가 사람이 자연스럽게 쓰는 형태이므로 거부하면 안 된다.
+    """
+    inventory = load_inventory(write_inventory(tmp_path, with_power("off")))
+
+    assert inventory[0].power == "off"
+    assert inventory[0].starts_powered_off is True
+
+
+def test_bare_yaml_on_is_accepted_as_a_string(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, with_power("on")))
+
+    assert inventory[0].power == "on"
+
+
+def test_rejects_unknown_power_value(tmp_path):
+    with pytest.raises(InventoryError, match="power"):
+        load_inventory(write_inventory(tmp_path, with_power("standby")))
+
+
+def test_shipped_example_inventory_loads():
+    """예시 파일이 로더를 통과하지 못하면 첫 사용자가 바로 막힌다."""
+    example = Path(__file__).resolve().parent.parent / "devices.example.yaml"
+
+    inventory = load_inventory(example)
+
+    assert any(item.starts_powered_off for item in inventory)
 
 
 def test_directory_at_inventory_path_explains_the_mount_mistake(tmp_path):

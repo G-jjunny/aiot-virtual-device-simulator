@@ -56,6 +56,7 @@ def public_inventory(devices_file: str | Path) -> list[dict[str, str]]:
             "site_id": item.site_id,
             "device_type": item.device_type,
             "facility_type": item.facility_type,
+            "power": item.power,
         }
         for item in load_inventory(devices_file)
     ]
@@ -104,14 +105,20 @@ def append_device(devices_file: str | Path, entry: dict[str, Any]) -> str:
     if any(item.device_id == credential.device_id for item in existing):
         raise PanelError(f"이미 등록된 device_id입니다: {credential.device_id}")
 
+    entry_out: dict[str, Any] = {
+        "device_id": credential.device_id,
+        "secret": credential.secret,
+        "site_id": credential.site_id,
+        "device_type": credential.device_type,
+        "facility_type": credential.facility_type,
+    }
+    if credential.starts_powered_off:
+        # 기본값(on)은 적지 않는다 — 손으로 보는 파일에 기본값 줄이 늘어나면
+        # 정작 꺼둔 기기가 눈에 띄지 않는다.
+        entry_out["power"] = credential.power
+
     block = yaml.safe_dump(
-        [{
-            "device_id": credential.device_id,
-            "secret": credential.secret,
-            "site_id": credential.site_id,
-            "device_type": credential.device_type,
-            "facility_type": credential.facility_type,
-        }],
+        [entry_out],
         allow_unicode=True,
         sort_keys=False,
         default_flow_style=False,
@@ -362,6 +369,9 @@ border-radius:99px;padding:5px 12px;font-size:12px}
 .tab:hover{color:var(--fg)}
 .tab.sel{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
 .tab .n{opacity:.75;margin-left:4px}
+.chk{display:flex;align-items:center;gap:7px;margin-top:12px;color:var(--fg)}
+.chk input{width:auto}
+.hint{color:var(--dim);font-size:11px;line-height:1.5;margin:6px 0 0}
 </style></head><body>
 <header>
   <h1>livesim 패널</h1>
@@ -381,6 +391,9 @@ border-radius:99px;padding:5px 12px;font-size:12px}
     <label>site_id (UUID)</label><input id="f_site">
     <label>device_type</label><select id="f_dt">__DEVICE_TYPES__</select>
     <label>facility_type</label><select id="f_ft">__FACILITY_TYPES__</select>
+    <label class="chk"><input type="checkbox" id="f_off"> 전원 off로 주입</label>
+    <p class="hint">FE에서 offline·정비중인 기기를 등재만 해둘 때 켜세요. 켜는 순간
+      발행이 시작되고 백엔드가 그 기기를 online으로 되살립니다.</p>
     <button class="wide" id="inject">주입하고 리로드</button>
     <div id="msg"></div>
   </aside>
@@ -491,9 +504,12 @@ function render(state,invList){
   const running=state.running!==false;
   const devs=running?(state.devices||[]):[];
   const conn=devs.filter(d=>d.connected).length;
+  // 꺼둔 기기가 있으면 접속 수가 모자라 보인다 — 왜 모자란지 같이 적는다.
+  const off=devs.filter(d=>d.event==='power_off').length;
   $('#sum').innerHTML = running
     ? '시나리오 <b>'+esc(state.scenario)+'</b> · tick <b>'+esc(state.tick)+
-      '</b> · 접속 <b>'+conn+'/'+devs.length+'</b> · 갱신 '+esc(state.updated_at)
+      '</b> · 접속 <b>'+conn+'/'+devs.length+'</b>'+
+      (off?' · 전원off <b>'+off+'</b>':'')+' · 갱신 '+esc(state.updated_at)
     : '<span class="err">러너가 실행 중이 아닙니다</span> · 인벤토리 '+invList.length+'대';
 
   // 러너가 없으면 인벤토리로 대신 그린다. 인벤토리에도 device_type이 있어
@@ -546,7 +562,8 @@ $('#inject').onclick=async()=>{
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({device_id:$('#f_id').value,secret:$('#f_sec').value,
         site_id:$('#f_site').value,device_type:$('#f_dt').value,
-        facility_type:$('#f_ft').value})});
+        facility_type:$('#f_ft').value,
+        power:$('#f_off').checked?'off':'on'})});
     say('주입 완료: '+r.device_id+' — 러너 리로드 요청됨',false);
     $('#f_id').value='';$('#f_sec').value='';$('#f_site').value='';
     setTimeout(refresh,800);

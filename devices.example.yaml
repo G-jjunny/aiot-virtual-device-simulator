@@ -28,3 +28,20 @@ devices:
     site_id: "550e8400-e29b-41d4-a716-446655440000"
     device_type: WEARABLE
     facility_type: OFFICE
+
+  # power: 이 기기를 등재할 때의 **초기** 전원 상태 (on | off, 생략 시 on).
+  #
+  # off로 두면 자격증명만 등재되고 접속·발행을 하지 않습니다. FE/DB에서
+  # offline이거나 정비중인 기기를 실험대에 올려두되, 발행으로 그 상태를
+  # 건드리고 싶지 않을 때 씁니다 — 발행이 시작되면 백엔드 트리거가 해당
+  # 기기를 online으로 되살리기 때문입니다.
+  #
+  # 켤 때는 `livesim ctl on <device_id>` 또는 패널의 [전원 on] 버튼.
+  # 등재된 뒤의 전원은 ctl/패널이 소유하므로, 여기 값을 나중에 고쳐도
+  # 이미 돌고 있는 기기에는 영향이 없습니다.
+  - device_id: AQ-SONGPA-02
+    secret: "여기에-발급받은-시크릿"
+    site_id: "550e8400-e29b-41d4-a716-446655440000"
+    device_type: FIXED
+    facility_type: OFFICE
+    power: off
