@@ -7,6 +7,7 @@ import pytest
 from livesim import control
 from livesim.api import ApiError
 from livesim.config import DeviceCredential, EventSpec, Scenario, load_inventory
+from livesim.device import MqttError
 from livesim.runner import Runner, RunnerError, kst_now, select_devices
 
 TS = datetime(2026, 7, 20, 14, 30, 0)
@@ -737,6 +738,49 @@ def test_snapshot_never_contains_secrets(tmp_path):
 
 
 # ---- 내구성 ------------------------------------------------------------
+
+
+def test_banned_device_counts_as_unavailable_not_published():
+    """실전 결함: ban된 기기가 '접속 완료 · 발행 N건'으로 보이고 DB엔 0건이었다.
+
+    CONNACK 거부가 예외로 올라오면 기존 접속 실패 경로가 그대로 받아준다.
+    """
+    connector = FakeConnector(
+        connect_failures=1, error=MqttError("MQTT 접속 거부: rc=135")
+    )
+    runner, _ = make_runner(["AQ-1", "AQ-2"], connector=connector)
+    runner.start()
+
+    stats = runner.tick(TS, now=0.0)
+
+    assert stats.unavailable == 1
+    assert stats.published == 1
+    assert runner.sessions["AQ-1"].disabled is False  # 재시도 대상 (영구 차단 아님)
+
+
+def test_unacked_publish_counts_as_failure_and_drops_the_connection():
+    """PUBACK이 안 오면 발행 성공으로 세면 안 된다 — 커넥션도 버려야 한다."""
+
+    class UnackedPublisher(FakePublisher):
+        def publish(self, topic, payload_str, qos=1):
+            raise MqttError("MQTT 발행 미확인")
+
+    class UnackedConnector(FakeConnector):
+        def __call__(self, cred):
+            self.calls.append(cred.device_id)
+            publisher = UnackedPublisher()
+            self.publishers.append(publisher)
+            return publisher
+
+    connector = UnackedConnector()
+    runner, _ = make_runner(["AQ-1"], connector=connector)
+    runner.start()
+
+    stats = runner.tick(TS, now=0.0)
+
+    assert stats.published == 0
+    assert stats.failed == 1
+    assert connector.publishers[0].disconnected is True
 
 
 def test_connect_failure_does_not_stop_other_devices():

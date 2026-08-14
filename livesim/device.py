@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
@@ -23,6 +24,14 @@ MAX_BUFFER = 288
 """
 
 
+CONNACK_TIMEOUT = 10.0
+PUBLISH_TIMEOUT = 5.0
+
+
+class MqttError(RuntimeError):
+    """브로커가 접속·발행을 받아주지 않았을 때."""
+
+
 class Publisher(Protocol):
     def publish(self, topic: str, payload_str: str, qos: int = 1) -> None: ...
 
@@ -36,6 +45,12 @@ class MqttPublisher:
     EMQX가 CONNECT의 username(=device_id)과 password(=device JWT)의 sub
     클레임을 대조해 ACL을 그 device_id로 스코프하므로, 반드시 connect() 전에
     설정되어야 한다.
+
+    접속·발행 모두 브로커의 응답을 확인한 뒤에야 성공으로 친다. paho는 둘 다
+    조용히 실패할 수 있어서(CONNECT는 CONNACK를 기다리지 않고 돌아오고,
+    wait_for_publish는 타임아웃에도 예외를 던지지 않는다), 확인을 생략하면
+    폐기된 기기가 "접속 완료 · 발행 N건"으로 보인다. 실물이라면 "보냈는데
+    서버에 없다"가 되는 허위 양성이다.
     """
 
     def __init__(
@@ -48,17 +63,64 @@ class MqttPublisher:
     ) -> None:
         self.host = host
         self.port = port
+        self.client_id = client_id
         self.client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id=client_id)
         if username is not None:
             self.client.username_pw_set(username, password)
+        self._connack: threading.Event = threading.Event()
+        self._reason: object = None
+        self.client.on_connect = self._on_connect
+
+    def _on_connect(self, client, userdata, flags, reason_code, properties=None):
+        self._reason = reason_code
+        self._connack.set()
 
     def connect(self) -> None:
+        """CONNACK까지 확인한다. 거부·무응답이면 정리하고 예외를 던진다."""
+        self._connack.clear()
+        self._reason = None
         self.client.connect(self.host, self.port, keepalive=30)
         self.client.loop_start()
 
+        if not self._connack.wait(timeout=CONNACK_TIMEOUT):
+            self._abort()
+            raise MqttError(
+                f"MQTT CONNACK 무응답 ({self.client_id}, {CONNACK_TIMEOUT:.0f}초)"
+            )
+        code = int(getattr(self._reason, "value", self._reason) or 0)
+        if code != 0:
+            self._abort()
+            raise MqttError(
+                f"MQTT 접속 거부 (banned or auth failure): rc={code} "
+                f"({self._reason}) — {self.client_id}"
+            )
+
+    def _abort(self) -> None:
+        """실패한 커넥션을 확실히 정리한다.
+
+        loop_stop을 하지 않으면 paho의 네트워크 스레드가 남아 옛 자격증명으로
+        무한 재접속을 시도한다. 재프로비저닝은 러너가 담당하므로, 여기서는
+        죽은 커넥션을 완전히 끊어 두어야 한다.
+        """
+        try:
+            self.client.disconnect()
+        except Exception:
+            pass
+        try:
+            self.client.loop_stop()
+        except Exception:
+            pass
+
     def publish(self, topic: str, payload_str: str, qos: int = 1) -> None:
         info = self.client.publish(topic, payload_str, qos=qos)
-        info.wait_for_publish(timeout=5)
+        info.wait_for_publish(timeout=PUBLISH_TIMEOUT)
+        if not info.is_published():
+            # wait_for_publish는 타임아웃에도 조용히 돌아온다. 이 확인이 없으면
+            # 브로커가 전부 차단해도 발행 건수만 늘어난다.
+            raise MqttError(
+                f"MQTT 발행 미확인 ({topic}, rc={info.rc}, "
+                f"{PUBLISH_TIMEOUT:.0f}초 내 PUBACK 없음)"
+            )
 
     def disconnect(self) -> None:
         # DISCONNECT 패킷이 실제로 나가려면 네트워크 루프가 아직 살아 있어야
