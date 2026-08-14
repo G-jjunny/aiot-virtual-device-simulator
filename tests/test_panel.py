@@ -314,6 +314,39 @@ def test_page_has_inline_event_forms(panel):
     assert "let openForm" in body      # 폴링 재렌더에도 열린 폼이 유지되도록
 
 
+def test_editing_card_is_excluded_from_rerender(panel):
+    """2초 폴링이 열린 폼을 매번 파괴하면 편집 자체가 불가능해진다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "function renderGrid" in body
+    assert "editingId()" in body
+    assert "data-did=" in body                        # 카드별 식별자
+    assert "if(d.device_id===keep) return;" in body   # 편집 중 카드 건너뛰기
+
+
+def test_other_cards_keep_updating_while_editing(panel):
+    """전체 정지 금지 — 편집 중인 카드 하나만 보호한다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "node.outerHTML!==html" in body
+
+
+def test_editing_card_shows_paused_notice(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "갱신 일시정지(편집 중)" in body
+
+
+def test_countdown_skips_the_editing_card(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "dataset.did===keep" in body
+
+
 def test_cmd_rejects_unknown_type(panel):
     base, env = panel
     res = requests.post(

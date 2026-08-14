@@ -408,6 +408,7 @@ border-radius:6px}
 .row .rng{color:var(--dim);font-size:10px;white-space:nowrap}
 .row .x{padding:2px 7px;font-size:11px;line-height:1.2}
 .formhint{color:var(--dim);font-size:10px;line-height:1.5;margin:2px 0 8px}
+.paused{color:var(--warn);font-size:10px;margin:0 0 8px}
 .go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
 </style></head><body>
 <header>
@@ -465,7 +466,7 @@ function matchesType(d){
 function selectType(t){
   activeType=t;
   try{ localStorage.setItem(TYPE_KEY,t) }catch(e){}
-  if(lastState) render(lastState,inv);
+  if(lastState) render(lastState,inv,true);
 }
 function renderTabs(devs){
   $('#tabs').innerHTML=TYPE_TABS.map(([key,label])=>{
@@ -505,7 +506,10 @@ function waitingText(event){
 }
 
 function tickCountdowns(){
+  const keep=editingId();
   document.querySelectorAll('[data-ends]').forEach(el=>{
+    // 편집 중인 카드는 배지도 건드리지 않는다 (편집 우선 — 잠깐 멈춰도 된다).
+    if(keep && el.closest('.card')?.dataset.did===keep) return;
     const left=parseFloat(el.dataset.ends)-serverNow();
     if(left>0){ el.textContent=fmtLeft(left); el.className='badge'; }
     else { el.textContent=el.dataset.waiting; el.className='badge w'; }
@@ -551,8 +555,7 @@ function toggleForm(id,kind){
   const key=formKey(id,kind);
   openForm = openForm===key ? null : key;
   if(!draft[id]) draft[id]={};
-  if(openForm && lastState) render(lastState,inv);
-  else if(lastState) render(lastState,inv);
+  if(lastState) render(lastState,inv,true);
 }
 function draftFor(id,kind,allowed){
   if(!draft[id]) draft[id]={};
@@ -573,13 +576,13 @@ function setMinutes(id,kind,value){ draftFor(id,kind).minutes=value }
 function setTarget(id,name,value){ draftFor(id,'burst').overrides[name]=value }
 function dropTarget(id,name){
   delete draftFor(id,'burst').overrides[name];
-  if(lastState) render(lastState,inv);
+  if(lastState) render(lastState,inv,true);
 }
 function addTarget(id,name){
   if(!name) return;
   const meta=META.sensors[name];
   draftFor(id,'burst').overrides[name]=meta?Math.round((meta.min+meta.max)/2*100)/100:0;
-  if(lastState) render(lastState,inv);
+  if(lastState) render(lastState,inv,true);
 }
 
 // 발행 주기 대비 몇 포인트가 영향을 받는지 — 5분 단절이 결측 1개뿐이라
@@ -598,6 +601,7 @@ function numInput(handler,value,extra){
 function dropoutForm(d,interval){
   const cur=draftFor(d.device_id,'dropout');
   return '<div class="panelform">'+
+    '<div class="paused">갱신 일시정지(편집 중) — 이 카드의 상태는 낡을 수 있습니다</div>'+
     '<div class="row"><label>지속(분)</label>'+
       numInput("setMinutes('"+esc(d.device_id)+"','dropout',this.value);"+
                "this.closest('.panelform').querySelector('.formhint').textContent="+
@@ -636,6 +640,7 @@ function burstForm(d,interval){
       addable.map(n=>'<option>'+esc(n)+'</option>').join('')+'</select></div>'
     : '';
   return '<div class="panelform">'+
+    '<div class="paused">갱신 일시정지(편집 중) — 이 카드의 상태는 낡을 수 있습니다</div>'+
     '<div class="row"><label>지속(분)</label>'+
       numInput("setMinutes('"+esc(id)+"','burst',this.value);"+
                "this.closest('.panelform').querySelector('.formhint').textContent="+
@@ -650,7 +655,7 @@ function burstForm(d,interval){
   '</div>';
 }
 
-function render(state,invList){
+function render(state,invList,force){
   const running=state.running!==false;
   const devs=running?(state.devices||[]):[];
   const conn=devs.filter(d=>d.connected).length;
@@ -678,25 +683,59 @@ function render(state,invList){
     return;
   }
   const interval=state.interval_seconds||300;
-  $('#grid').innerHTML=rows.map(d=>{
-    const info=inv.find(i=>i.device_id===d.device_id)||{};
-    const id=esc(d.device_id);
-    return '<div class="card '+cls(d)+'">'+
-      '<div class="did">'+id+'</div>'+
-      '<div class="meta">'+esc(d.device_type||info.device_type||'')+
-        (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
-      '<div>'+badges(d)+'</div>'+
-      '<div class="btns">'+
-        '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
-        '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
-        '<button onclick="toggleForm(\\''+id+'\\',\\'dropout\\')">단절…</button>'+
-        '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
-      '</div>'+
-      (openForm===formKey(d.device_id,'dropout')?dropoutForm(d,interval):'')+
-      (openForm===formKey(d.device_id,'burst')?burstForm(d,interval):'')+
-    '</div>';
-  }).join('');
+  renderGrid(rows,interval,force);
   tickCountdowns();   // 새로 그린 배지에 즉시 숫자를 채운다
+}
+
+function cardHtml(d,interval){
+  const info=inv.find(i=>i.device_id===d.device_id)||{};
+  const id=esc(d.device_id);
+  const dropout=openForm===formKey(d.device_id,'dropout');
+  const burst=openForm===formKey(d.device_id,'burst');
+  return '<div class="card '+cls(d)+'" data-did="'+id+'">'+
+    '<div class="did">'+id+'</div>'+
+    '<div class="meta">'+esc(d.device_type||info.device_type||'')+
+      (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
+    '<div>'+badges(d)+'</div>'+
+    '<div class="btns">'+
+      '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
+      '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
+      '<button onclick="toggleForm(\\''+id+'\\',\\'dropout\\')">단절…</button>'+
+      '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
+    '</div>'+
+    (dropout?dropoutForm(d,interval):'')+
+    (burst?burstForm(d,interval):'')+
+  '</div>';
+}
+
+// 편집 중인 카드는 재렌더에서 제외한다.
+//
+// 2초 폴링이 그리드를 통째로 다시 그리면, 열려 있는 폼의 입력값과 포커스가
+// 매번 날아가 편집 자체가 불가능하다. 그 카드의 DOM 노드만 손대지 않고
+// 나머지 카드는 평소대로 갱신한다 — 전체를 멈추면 다른 기기 상태가 낡는다.
+function editingId(){ return openForm ? openForm.split('|')[0] : null }
+
+function renderGrid(rows,interval,force){
+  const grid=$('#grid');
+  // force: 사용자가 직접 일으킨 렌더(폼 열기/닫기, 항목 추가·제거, 탭 전환).
+  // 이때는 편집 중인 카드도 다시 그려야 한다 — 안 그리면 폼을 열라는 조작이
+  // 바로 그 '편집 중 보호'에 걸려 아무 일도 일어나지 않는다.
+  const keep=force?null:editingId();
+  const wanted=rows.map(d=>d.device_id).join('\\u0000');
+  const current=[...grid.children].map(n=>n.dataset.did||'').join('\\u0000');
+
+  if(wanted!==current){
+    // 구성(대수·순서·탭 필터)이 바뀌면 통째로 다시 그린다. 편집 중이었다면
+    // 폼은 닫히지만 입력값은 draft에 남아 다시 열면 그대로다.
+    grid.innerHTML=rows.map(d=>cardHtml(d,interval)).join('');
+    return;
+  }
+  rows.forEach((d,index)=>{
+    if(d.device_id===keep) return;              // 편집 중 — 건드리지 않는다
+    const node=grid.children[index];
+    const html=cardHtml(d,interval);
+    if(node.outerHTML!==html) node.outerHTML=html;
+  });
 }
 
 async function refresh(){
