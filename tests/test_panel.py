@@ -251,6 +251,69 @@ def test_cmd_accepts_reload_without_device_id(panel):
     assert control.drain_commands(env.control_dir)[0].command == "reload"
 
 
+def test_cmd_forwards_burst_overrides(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "burst", "device_id": "AQ-01", "minutes": 60,
+              "overrides": {"pm25": 150, "co2": 3000}},
+        timeout=5,
+    )
+
+    assert res.status_code == 200
+    command = control.drain_commands(env.control_dir)[0]
+    assert command.minutes == 60.0
+    assert command.overrides == {"pm25": 150.0, "co2": 3000.0}
+
+
+def test_cmd_rejects_unknown_sensor_with_a_reason(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "burst", "device_id": "AQ-01", "overrides": {"nope": 1}},
+        timeout=5,
+    )
+
+    assert res.status_code == 422
+    assert "알 수 없는 센서" in res.json()["error"]
+    assert control.drain_commands(env.control_dir) == []
+
+
+def test_cmd_rejects_non_numeric_target(panel):
+    base, _ = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "burst", "device_id": "AQ-01", "overrides": {"pm25": "높게"}},
+        timeout=5,
+    )
+
+    assert res.status_code == 422
+    assert "숫자" in res.json()["error"]
+
+
+def test_page_embeds_sensor_metadata(panel):
+    """프로필은 파이썬이 진실 — JS에 값을 복사해 두면 범위 표시가 어긋난다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "const META=" in body
+    assert '"burst_defaults"' in body
+    assert '"pm25"' in body and '"heart_rate"' in body   # 센서 범위
+    assert '"WEARABLE"' in body                          # 유형별 필드
+
+
+def test_page_has_inline_event_forms(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "dropoutForm" in body and "burstForm" in body
+    assert "toggleForm" in body
+    assert "지속(분)" in body
+    assert "항목 추가" in body
+    assert "pointsHint" in body        # 주기 대비 포인트 수 안내
+    assert "let openForm" in body      # 폴링 재렌더에도 열린 폼이 유지되도록
+
+
 def test_cmd_rejects_unknown_type(panel):
     base, env = panel
     res = requests.post(

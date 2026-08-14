@@ -19,6 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from livesim.profiles import SENSOR_PROFILES
+
 LOG = logging.getLogger("livesim.control")
 
 COMMAND_PREFIX = "cmd-"
@@ -50,6 +52,48 @@ class Command:
     command: str
     device_id: str = ""
     minutes: float | None = None
+    overrides: dict[str, float] | None = None
+    """burst 전용. 없으면 러너가 시나리오·내장 기본값을 쓴다."""
+
+
+def parse_overrides(raw: Any, strict: bool = True) -> dict[str, float] | None:
+    """센서별 목표치를 검증한다.
+
+    strict=True (명령을 받는 쪽: panel/ctl): 잘못된 항목이 있으면 거부한다.
+    사람이 값을 넣었는데 조용히 무시되면 "왜 아무 일도 안 일어나지"가 된다.
+
+    strict=False (러너가 파일을 읽는 쪽): 잘못된 항목만 버리고 경고한다.
+    손으로 만든 명령 파일의 오타 하나 때문에 나머지 지시까지 날리지 않는다.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        if strict:
+            raise ControlError("overrides는 {센서: 값} 매핑이어야 합니다")
+        LOG.warning("overrides가 매핑이 아니라 무시: %r", raw)
+        return None
+
+    parsed: dict[str, float] = {}
+    for name, value in raw.items():
+        try:
+            if name not in SENSOR_PROFILES:
+                raise ControlError(
+                    f"알 수 없는 센서 '{name}' "
+                    f"(사용 가능: {', '.join(sorted(SENSOR_PROFILES))})"
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+                raise ControlError(f"{name}: 숫자여야 합니다 (받은 값: {value!r})")
+            try:
+                parsed[name] = float(value)
+            except ValueError as exc:
+                raise ControlError(
+                    f"{name}: 숫자여야 합니다 (받은 값: {value!r})"
+                ) from exc
+        except ControlError:
+            if strict:
+                raise
+            LOG.warning("목표치 항목 무시: %s=%r", name, value)
+    return parsed or None
 
 
 def _atomic_write(path: Path, payload: dict[str, Any]) -> None:
@@ -63,11 +107,13 @@ def write_command(
     command: str,
     device_id: str = "",
     minutes: float | None = None,
+    overrides: dict[str, float] | None = None,
 ) -> Path:
     if command not in COMMANDS:
         raise ControlError(f"알 수 없는 명령 '{command}' (사용 가능: {COMMANDS})")
     if command in DEVICE_COMMANDS and not device_id:
         raise ControlError(f"'{command}' 명령에는 device_id가 필요합니다")
+    overrides = parse_overrides(overrides)
     directory = Path(control_dir)
     directory.mkdir(parents=True, exist_ok=True)
     # 파일명에 시각을 넣어 사전순 = 발행순이 되게 한다. 같은 초에 두 명령이
@@ -75,7 +121,13 @@ def write_command(
     name = f"{COMMAND_PREFIX}{time.time():.6f}-{uuid.uuid4().hex[:8]}{COMMAND_SUFFIX}"
     path = directory / name
     _atomic_write(
-        path, {"command": command, "device_id": device_id, "minutes": minutes}
+        path,
+        {
+            "command": command,
+            "device_id": device_id,
+            "minutes": minutes,
+            "overrides": overrides,
+        },
     )
     return path
 
@@ -100,6 +152,9 @@ def drain_commands(control_dir: str | Path) -> list[Command]:
                     command=command,
                     device_id=device_id,
                     minutes=float(minutes) if minutes is not None else None,
+                    # 필드가 없는 예전 명령 파일도 그대로 읽힌다. 손으로 만든
+                    # 파일의 잘못된 항목은 버리되 명령 자체는 살린다.
+                    overrides=parse_overrides(raw.get("overrides"), strict=False),
                 )
             )
         except Exception as exc:

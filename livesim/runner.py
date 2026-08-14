@@ -338,10 +338,18 @@ class Runner:
                 session.device.go_offline()
             LOG.info("[ctl] 통신 단절: %s (%s분)", command.device_id, command.minutes)
         elif command.command == control.BURST:
+            # 명령이 목표치를 실어 왔으면 그걸, 아니면 시나리오·내장 기본값을.
+            # 항목 검증은 control.drain_commands가 이미 마쳤다.
+            overrides = command.overrides or self._burst_overrides()
             self.scheduler.force(
-                command.device_id, ALERT_BURST, now, seconds, self._burst_overrides()
+                command.device_id, ALERT_BURST, now, seconds, overrides
             )
-            LOG.info("[ctl] 오염 급증: %s (%s분)", command.device_id, command.minutes)
+            LOG.info(
+                "[ctl] 오염 급증: %s (%s분, %s)",
+                command.device_id,
+                command.minutes,
+                ", ".join(f"{k}={v:g}" for k, v in overrides.items()),
+            )
 
     def reload_inventory(self) -> ReloadResult:
         """devices.yaml을 다시 읽어 세션을 맞춘다 (추가/제거/시크릿 변경).

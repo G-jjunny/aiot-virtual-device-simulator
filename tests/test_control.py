@@ -160,6 +160,65 @@ def test_format_remaining_is_empty_without_an_event():
     assert control.format_remaining(None) == ""
 
 
+# ---- 명령 overrides ----------------------------------------------------
+
+
+def test_overrides_survive_a_write_read_roundtrip(tmp_path):
+    control.write_command(
+        tmp_path, control.BURST, "AQ-01", minutes=60,
+        overrides={"pm25": 150, "co2": 3000},
+    )
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.minutes == 60.0
+    assert command.overrides == {"pm25": 150.0, "co2": 3000.0}
+
+
+def test_command_without_overrides_reads_as_none(tmp_path):
+    """필드가 없던 예전 명령 파일도 그대로 읽혀야 한다."""
+    (tmp_path / "cmd-old.json").write_text(
+        json.dumps({"command": "burst", "device_id": "AQ-01", "minutes": 10}),
+        encoding="utf-8",
+    )
+
+    assert control.drain_commands(tmp_path)[0].overrides is None
+
+
+def test_write_rejects_unknown_sensor(tmp_path):
+    with pytest.raises(control.ControlError, match="알 수 없는 센서"):
+        control.write_command(tmp_path, control.BURST, "AQ-01", overrides={"nope": 1})
+
+    assert list(tmp_path.glob("cmd-*.json")) == []
+
+
+def test_write_rejects_non_numeric_target(tmp_path):
+    with pytest.raises(control.ControlError, match="숫자"):
+        control.write_command(
+            tmp_path, control.BURST, "AQ-01", overrides={"pm25": "높게"}
+        )
+
+
+def test_parse_overrides_accepts_numeric_strings():
+    """--set pm25=150은 문자열로 들어온다."""
+    assert control.parse_overrides({"pm25": "150"}) == {"pm25": 150.0}
+
+
+def test_parse_overrides_rejects_booleans():
+    with pytest.raises(control.ControlError, match="숫자"):
+        control.parse_overrides({"pm25": True})
+
+
+def test_parse_overrides_passes_through_none_and_empty():
+    assert control.parse_overrides(None) is None
+    assert control.parse_overrides({}) is None
+
+
+def test_parse_overrides_rejects_non_mapping():
+    with pytest.raises(control.ControlError, match="매핑"):
+        control.parse_overrides([("pm25", 1)])
+
+
 # ---- 유형 축약 ---------------------------------------------------------
 
 

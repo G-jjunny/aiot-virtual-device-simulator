@@ -33,6 +33,7 @@ from livesim.config import (
     load_inventory,
     parse_credential,
 )
+from livesim.profiles import DEVICE_FIELDS, SENSOR_PROFILES
 
 LOG = logging.getLogger("livesim.panel")
 
@@ -270,8 +271,10 @@ class PanelHandler(BaseHTTPRequestHandler):
                 minutes = float(minutes)
             except (TypeError, ValueError) as exc:
                 raise PanelError(f"minutes는 숫자여야 합니다: {minutes!r}") from exc
+        # 알 수 없는 센서·비수치 값은 여기서 422로 돌려준다 (control.parse_overrides).
         control.write_command(
-            self.settings.control_dir, command, device_id, minutes
+            self.settings.control_dir, command, device_id, minutes,
+            body.get("overrides"),
         )
         return {"ok": True, "type": command, "device_id": device_id}
 
@@ -309,6 +312,29 @@ def serve(settings: Settings, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT
         pass
     finally:
         server.server_close()
+
+
+def _sensor_meta() -> str:
+    """센서 범위·유형별 필드·기본 목표치를 JSON으로 내보낸다.
+
+    프로필은 파이썬 쪽이 진실이므로 JS에 값을 복사해 두지 않는다 — 두 벌이 되면
+    화면에 표시하는 범위와 실제 클램프가 조용히 어긋난다.
+    """
+    return json.dumps(
+        {
+            "sensors": {
+                name: {
+                    "min": profile.minimum,
+                    "max": profile.maximum,
+                    "decimals": profile.decimals,
+                }
+                for name, profile in SENSOR_PROFILES.items()
+            },
+            "fields": {key: list(value) for key, value in DEVICE_FIELDS.items()},
+            "burst_defaults": control.DEFAULT_BURST_OVERRIDES,
+        },
+        ensure_ascii=False,
+    )
 
 
 PAGE = (
@@ -372,6 +398,17 @@ border-radius:99px;padding:5px 12px;font-size:12px}
 .chk{display:flex;align-items:center;gap:7px;margin-top:12px;color:var(--fg)}
 .chk input{width:auto}
 .hint{color:var(--dim);font-size:11px;line-height:1.5;margin:6px 0 0}
+.panelform{margin-top:10px;padding:10px;background:#12151d;border:1px solid var(--line);
+border-radius:6px}
+.panelform.hidden{display:none}
+.row{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.row label{margin:0;flex:0 0 auto;color:var(--dim);font-size:11px}
+.row input,.row select{padding:4px 6px;font-size:12px}
+.row input.num{width:80px;flex:0 0 auto}
+.row .rng{color:var(--dim);font-size:10px;white-space:nowrap}
+.row .x{padding:2px 7px;font-size:11px;line-height:1.2}
+.formhint{color:var(--dim);font-size:10px;line-height:1.5;margin:2px 0 8px}
+.go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
 </style></head><body>
 <header>
   <h1>livesim 패널</h1>
@@ -490,15 +527,128 @@ function badges(d){
   return h;
 }
 
-async function cmd(type,device_id,minutes){
+async function cmd(type,device_id,minutes,overrides){
   try{
     await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type,device_id,minutes})});
+      body:JSON.stringify({type,device_id,minutes,overrides})});
     say('명령 전달: '+type+' '+(device_id||''),false);
+    openForm=null;
     setTimeout(refresh,600);
   }catch(e){say(e.message,true)}
 }
 function say(t,bad){const m=$('#msg');m.textContent=t;m.className=bad?'err':'good'}
+
+// ---- 수동 이벤트 설정 폼 -------------------------------------------------
+//
+// 카드 안에서 접었다 펴는 방식. 어떤 카드의 어떤 폼이 열렸는지는 JS 변수에
+// 둔다 — 2초 폴링이 카드를 다시 그리므로 DOM에 기대면 매번 닫힌다.
+const META=__SENSOR_META__;
+let openForm=null;          // "device_id|dropout" 또는 "device_id|burst"
+let draft={};               // device_id -> {minutes, overrides:{name:value}}
+
+function formKey(id,kind){return id+'|'+kind}
+function toggleForm(id,kind){
+  const key=formKey(id,kind);
+  openForm = openForm===key ? null : key;
+  if(!draft[id]) draft[id]={};
+  if(openForm && lastState) render(lastState,inv);
+  else if(lastState) render(lastState,inv);
+}
+function draftFor(id,kind,allowed){
+  if(!draft[id]) draft[id]={};
+  const d=draft[id];
+  if(d.minutes==null) d.minutes = kind==='dropout'?5:10;
+  if(kind==='burst' && !d.overrides){
+    // 기본 목표치는 그대로 쓰되, 이 기기가 측정하지 않는 항목은 뺀다.
+    // 웨어러블에 pm25를 걸면 페이로드에 실리지 않아 "실행했는데 아무 변화가
+    // 없다"가 된다 — 이 기능이 고치려는 문제 그 자체다.
+    const base={...META.burst_defaults};
+    d.overrides = (allowed && allowed.length)
+      ? Object.fromEntries(Object.entries(base).filter(([k])=>allowed.includes(k)))
+      : base;
+  }
+  return d;
+}
+function setMinutes(id,kind,value){ draftFor(id,kind).minutes=value }
+function setTarget(id,name,value){ draftFor(id,'burst').overrides[name]=value }
+function dropTarget(id,name){
+  delete draftFor(id,'burst').overrides[name];
+  if(lastState) render(lastState,inv);
+}
+function addTarget(id,name){
+  if(!name) return;
+  const meta=META.sensors[name];
+  draftFor(id,'burst').overrides[name]=meta?Math.round((meta.min+meta.max)/2*100)/100:0;
+  if(lastState) render(lastState,inv);
+}
+
+// 발행 주기 대비 몇 포인트가 영향을 받는지 — 5분 단절이 결측 1개뿐이라
+// "아무 일도 안 일어난 것처럼" 보이는 게 이 기능이 생긴 이유다.
+function pointsHint(minutes,interval,kind){
+  const n=Math.floor((Number(minutes)||0)*60/(interval||300));
+  const unit = kind==='dropout' ? '결측' : '상승';
+  return '발행 주기 '+(interval||300)+'초 기준 ≈ '+unit+' '+n+'포인트';
+}
+
+function numInput(handler,value,extra){
+  return '<input class="num" type="number" value="'+value+'" '+(extra||'')+
+         ' oninput="'+handler+'">';
+}
+
+function dropoutForm(d,interval){
+  const cur=draftFor(d.device_id,'dropout');
+  return '<div class="panelform">'+
+    '<div class="row"><label>지속(분)</label>'+
+      numInput("setMinutes('"+esc(d.device_id)+"','dropout',this.value);"+
+               "this.closest('.panelform').querySelector('.formhint').textContent="+
+               "pointsHint(this.value,"+interval+",'dropout')",
+               cur.minutes,'min="1" max="1440"')+
+      '<button class="go" onclick="cmd(\\'dropout\\',\\''+esc(d.device_id)+
+        '\\',Number(draftFor(\\''+esc(d.device_id)+'\\',\\'dropout\\').minutes))">실행</button>'+
+    '</div>'+
+    '<div class="formhint">'+pointsHint(cur.minutes,interval,'dropout')+'</div>'+
+  '</div>';
+}
+
+function burstForm(d,interval){
+  const id=d.device_id;
+  const allowed=META.fields[d.device_type||'FIXED']||[];
+  const cur=draftFor(id,'burst',allowed);
+  // 이 기기가 실제로 발행하는 센서만 고를 수 있다. 웨어러블에 pm25를 걸어도
+  // 페이로드에 실리지 않으므로 목록에서 빼는 편이 정직하다.
+  const rows=Object.keys(cur.overrides).map(name=>{
+    const meta=META.sensors[name]||{min:0,max:0};
+    const unsupported = allowed.length && !allowed.includes(name);
+    return '<div class="row">'+
+      '<label style="flex:0 0 74px">'+esc(name)+'</label>'+
+      numInput("setTarget('"+esc(id)+"','"+esc(name)+"',this.value)",cur.overrides[name],
+               'step="any"')+
+      '<span class="rng">'+meta.min+'~'+meta.max+
+        (unsupported?' · 이 유형 미측정':'')+'</span>'+
+      '<button class="x" onclick="dropTarget(\\''+esc(id)+'\\',\\''+esc(name)+
+        '\\')">제거</button>'+
+    '</div>';
+  }).join('');
+  const addable=allowed.filter(n=>!(n in cur.overrides));
+  const adder=addable.length
+    ? '<div class="row"><label>항목 추가</label><select onchange="addTarget(\\''+
+      esc(id)+'\\',this.value);this.value=\\'\\'"><option value="">선택…</option>'+
+      addable.map(n=>'<option>'+esc(n)+'</option>').join('')+'</select></div>'
+    : '';
+  return '<div class="panelform">'+
+    '<div class="row"><label>지속(분)</label>'+
+      numInput("setMinutes('"+esc(id)+"','burst',this.value);"+
+               "this.closest('.panelform').querySelector('.formhint').textContent="+
+               "pointsHint(this.value,"+interval+",'burst')",
+               cur.minutes,'min="1" max="1440"')+
+      '<button class="go" onclick="cmd(\\'burst\\',\\''+esc(id)+
+        '\\',Number(draftFor(\\''+esc(id)+'\\',\\'burst\\').minutes),'+
+        'draftFor(\\''+esc(id)+'\\',\\'burst\\').overrides)">실행</button>'+
+    '</div>'+
+    '<div class="formhint">'+pointsHint(cur.minutes,interval,'burst')+'</div>'+
+    (rows||'<div class="formhint">아래에서 항목을 추가하세요.</div>')+adder+
+  '</div>';
+}
 
 function render(state,invList){
   const running=state.running!==false;
@@ -527,19 +677,24 @@ function render(state,invList){
     $('#grid').innerHTML='<div class="empty">이 유형의 기기가 없습니다.</div>';
     return;
   }
+  const interval=state.interval_seconds||300;
   $('#grid').innerHTML=rows.map(d=>{
     const info=inv.find(i=>i.device_id===d.device_id)||{};
+    const id=esc(d.device_id);
     return '<div class="card '+cls(d)+'">'+
-      '<div class="did">'+esc(d.device_id)+'</div>'+
+      '<div class="did">'+id+'</div>'+
       '<div class="meta">'+esc(d.device_type||info.device_type||'')+
         (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
       '<div>'+badges(d)+'</div>'+
       '<div class="btns">'+
-        '<button onclick="cmd(\\'on\\',\\''+esc(d.device_id)+'\\')">전원 on</button>'+
-        '<button onclick="cmd(\\'off\\',\\''+esc(d.device_id)+'\\')">전원 off</button>'+
-        '<button onclick="cmd(\\'dropout\\',\\''+esc(d.device_id)+'\\',5)">단절 5분</button>'+
-        '<button onclick="cmd(\\'burst\\',\\''+esc(d.device_id)+'\\',10)">버스트 10분</button>'+
-      '</div></div>';
+        '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
+        '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
+        '<button onclick="toggleForm(\\''+id+'\\',\\'dropout\\')">단절…</button>'+
+        '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
+      '</div>'+
+      (openForm===formKey(d.device_id,'dropout')?dropoutForm(d,interval):'')+
+      (openForm===formKey(d.device_id,'burst')?burstForm(d,interval):'')+
+    '</div>';
   }).join('');
   tickCountdowns();   // 새로 그린 배지에 즉시 숫자를 채운다
 }
@@ -571,8 +726,9 @@ $('#inject').onclick=async()=>{
   finally{btn.disabled=false}
 };
 
-window.cmd=cmd;
-window.selectType=selectType;   // 카드/탭의 인라인 onclick에서 부른다
+// 카드·탭·폼의 인라인 onclick/oninput에서 부른다
+Object.assign(window,{cmd,selectType,toggleForm,setMinutes,setTarget,
+                      dropTarget,addTarget,draftFor,pointsHint});
 refresh();
 setInterval(refresh,2000);        // 데이터 폴링
 setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재렌더 없음)
@@ -586,4 +742,5 @@ setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재�
         "__FACILITY_TYPES__",
         "".join(f"<option>{name}</option>" for name in FACILITY_TYPES),
     )
+    .replace("__SENSOR_META__", _sensor_meta())
 )

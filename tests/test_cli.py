@@ -2,7 +2,8 @@
 
 import pytest
 
-from livesim.__main__ import build_parser, normalize_argv
+from livesim.__main__ import build_parser, normalize_argv, parse_set_options
+from livesim.control import ControlError
 
 
 def parse(argv):
@@ -82,6 +83,40 @@ def test_ctl_burst_accepts_minutes():
 
     assert args.ctl_command == "burst"
     assert args.minutes == 30.0
+
+
+def test_ctl_burst_accepts_repeated_set():
+    args = parse(["ctl", "burst", "AQ-01", "--set", "pm25=150", "--set", "co2=3000"])
+
+    assert args.set == ["pm25=150", "co2=3000"]
+
+
+def test_set_options_parse_to_floats():
+    assert parse_set_options(["pm25=150", "co2=3000"]) == {
+        "pm25": 150.0,
+        "co2": 3000.0,
+    }
+
+
+def test_set_options_default_to_none():
+    assert parse_set_options(None) is None
+    assert parse_set_options([]) is None
+
+
+def test_set_option_without_equals_is_rejected():
+    with pytest.raises(ControlError, match="항목=값"):
+        parse_set_options(["pm25"])
+
+
+def test_set_option_with_unknown_sensor_is_rejected():
+    with pytest.raises(ControlError, match="알 수 없는 센서"):
+        parse_set_options(["nope=1"])
+
+
+def test_dropout_does_not_accept_set():
+    """항목별 목표치는 버스트 전용 개념이다."""
+    with pytest.raises(SystemExit):
+        parse(["ctl", "dropout", "AQ-01", "--set", "pm25=150"])
 
 
 def test_ctl_status_needs_no_device():

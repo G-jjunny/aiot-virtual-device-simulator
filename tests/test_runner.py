@@ -590,6 +590,57 @@ def test_ctl_burst_uses_scenario_overrides(tmp_path):
     assert 270.0 <= payload["pm25"] <= 330.0
 
 
+def test_ctl_burst_uses_overrides_from_the_command(tmp_path):
+    """명령에 목표치가 실려 오면 시나리오 기본값 대신 그걸 쓴다."""
+    events = [EventSpec("alert_burst", 0.1, (10.0, 30.0), {"pm25": 300.0})]
+    runner, connector = make_runner(["AQ-1"], events, control_dir=str(tmp_path))
+    runner.start()
+
+    control.write_command(
+        tmp_path, control.BURST, "AQ-1", minutes=60, overrides={"pm25": 150.0}
+    )
+    runner.drain_control()
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    assert 135.0 <= payload["pm25"] <= 165.0  # 시나리오의 300이 아니라 명령의 150
+
+
+def test_command_overrides_are_clamped_to_sensor_range(tmp_path):
+    """과장된 목표치가 업로드 검증(422)을 유발하면 안 된다."""
+    from livesim.profiles import SENSOR_PROFILES
+
+    runner, connector = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+
+    control.write_command(
+        tmp_path, control.BURST, "AQ-1", minutes=60, overrides={"pm25": 99999.0}
+    )
+    runner.drain_control()
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    assert payload["pm25"] == SENSOR_PROFILES["pm25"].maximum
+
+
+def test_runner_ignores_unknown_sensor_in_a_handmade_command(tmp_path):
+    """손으로 만든 명령 파일도 이 경로로 들어온다 — 죽지 말고 그 항목만 버린다."""
+    runner, connector = make_runner(["AQ-1"], control_dir=str(tmp_path))
+    runner.start()
+    (tmp_path / "cmd-hand.json").write_text(
+        json.dumps({"command": "burst", "device_id": "AQ-1", "minutes": 30,
+                    "overrides": {"nope": 1, "pm25": 150}}),
+        encoding="utf-8",
+    )
+
+    runner.drain_control()
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    assert 135.0 <= payload["pm25"] <= 165.0
+    assert "nope" not in payload
+
+
 def test_ctl_burst_falls_back_to_builtin_defaults(tmp_path):
     runner, connector = make_runner(["AQ-1"], control_dir=str(tmp_path))
     runner.start()

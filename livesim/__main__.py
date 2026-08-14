@@ -140,16 +140,35 @@ def cmd_ctl(args: argparse.Namespace) -> int:
 
     minutes = getattr(args, "minutes", None)
     device_id = getattr(args, "device_id", "")
+    overrides = parse_set_options(getattr(args, "set", None))
     control.write_command(
-        settings.control_dir, args.ctl_command, device_id, minutes
+        settings.control_dir, args.ctl_command, device_id, minutes, overrides
     )
     suffix = f" ({minutes:g}분)" if minutes is not None else ""
     target = f" → {device_id}" if device_id else ""
+    targets = (
+        " " + ", ".join(f"{k}={v:g}" for k, v in overrides.items()) if overrides else ""
+    )
     print(
-        f"[ctl] {args.ctl_command}{target}{suffix} 명령을 넣었습니다 "
+        f"[ctl] {args.ctl_command}{target}{suffix}{targets} 명령을 넣었습니다 "
         f"({settings.control_dir}). 러너가 1초 내에 적용합니다."
     )
     return 0
+
+
+def parse_set_options(pairs: list[str] | None) -> dict[str, float] | None:
+    """`--set pm25=150`을 {"pm25": 150.0}으로. 값 검증은 control이 맡는다."""
+    if not pairs:
+        return None
+    parsed: dict[str, object] = {}
+    for item in pairs:
+        name, separator, value = item.partition("=")
+        if not separator or not name.strip():
+            raise control.ControlError(
+                f"--set은 항목=값 형태여야 합니다 (받은 값: {item!r})"
+            )
+        parsed[name.strip()] = value.strip()
+    return control.parse_overrides(parsed)
 
 
 def cmd_panel(args: argparse.Namespace) -> int:
@@ -243,15 +262,28 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         item = ctl_sub.add_parser(name, help=help_text)
         item.add_argument("device_id")
-    for name, help_text in (
-        (control.DROPOUT, "통신 단절 (버퍼링 후 복구 시 batch 재전송)"),
-        (control.BURST, "오염 급증 (시나리오 alert_burst 목표값 재사용)"),
-    ):
-        item = ctl_sub.add_parser(name, help=help_text)
-        item.add_argument("device_id")
-        item.add_argument(
-            "--minutes", type=float, default=10.0, help="지속 시간(분, 기본 10)"
-        )
+    dropout_parser = ctl_sub.add_parser(
+        control.DROPOUT, help="통신 단절 (버퍼링 후 복구 시 batch 재전송)"
+    )
+    dropout_parser.add_argument("device_id")
+    dropout_parser.add_argument(
+        "--minutes", type=float, default=10.0, help="지속 시간(분, 기본 10)"
+    )
+
+    burst_parser = ctl_sub.add_parser(
+        control.BURST, help="오염 급증 (기본 목표값은 시나리오 alert_burst 재사용)"
+    )
+    burst_parser.add_argument("device_id")
+    burst_parser.add_argument(
+        "--minutes", type=float, default=10.0, help="지속 시간(분, 기본 10)"
+    )
+    burst_parser.add_argument(
+        "--set",
+        action="append",
+        metavar="항목=값",
+        help="센서별 목표치 (반복 가능: --set pm25=150 --set co2=3000). "
+             "생략하면 시나리오·내장 기본값",
+    )
     ctl_sub.add_parser("status", help="state.json을 표로 출력")
     ctl_sub.add_parser(
         control.RELOAD, help="devices.yaml을 다시 읽어 플릿에 반영 (device_id 불필요)"
