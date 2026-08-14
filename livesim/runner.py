@@ -570,7 +570,10 @@ def make_connector(settings: Settings) -> Callable[[DeviceCredential], Publisher
         publisher = MqttPublisher(
             settings.mqtt_host,
             settings.mqtt_port,
-            client_id=f"livesim-{credential.device_id}",
+            # 플랫폼 규약은 username=clientid=device_id (백엔드 EmqxPublishClient
+            # 주석 참조). 접두어를 붙이면 v0.1.5 토큰 폐기의 EMQX ban(clientid
+            # 기준)이 가상 기기를 비껴가 — 실물과 다르게 폐기가 안 먹힌다.
+            client_id=credential.device_id,
             username=credential.device_id,
             password=token,
         )
