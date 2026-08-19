@@ -22,8 +22,8 @@ DB에 붙지 않고, 관리자 계정도 쓰지 않습니다. **실제 디바이
                                               │ ① POST /auth/device/token
                                               │    {device_id, secret} → JWT
                                               ▼
-                            MQTT PUBLISH (username=device_id, password=JWT)
-                              aiot/v1/{facility}/{site_id}/{type}/{device_id}/sensor
+                MQTT CONNECT (clientid = username = device_id, password = JWT)
+                     PUBLISH aiot/v1/{facility}/{site_id}/{type}/{device_id}/sensor
                                               │
                                               ▼
                             EMQX ──webhook──▶ aiot-api ──▶ TimescaleDB
@@ -32,8 +32,36 @@ DB에 붙지 않고, 관리자 계정도 쓰지 않습니다. **실제 디바이
 `devices.yaml`에 값을 옮겨 적는 행위가 실물 디바이스의 **"공장/설치 시 설정 주입"**에 해당합니다.
 디바이스는 자기 자격증명만 알 뿐, 관리자 계정도 다른 디바이스의 존재도 알지 못합니다.
 
-디바이스 1대당 MQTT 커넥션 1개를 씁니다. EMQX ACL이 CONNECT 시점의 인증된 `device_id` 하나로
-발행 권한을 스코프하기 때문에, 커넥션을 공유하면 다른 디바이스의 토픽 발행이 거부됩니다.
+### MQTT 접속 규약 — clientid = username = device_id
+
+디바이스 1대당 MQTT 커넥션 1개를 쓰고, **clientid와 username을 모두 `device_id`와 똑같이**
+맞춥니다. 플랫폼 규약(백엔드 `EmqxPublishClient` 참조)이기도 하지만, 시뮬레이터 입장에서 더
+중요한 이유가 있습니다.
+
+- EMQX ACL은 CONNECT 시점의 인증된 `device_id` 하나로 발행 권한을 스코프합니다. 커넥션을
+  공유하면 다른 디바이스의 토픽 발행이 거부됩니다.
+- 백엔드의 **토큰 폐기(revoke)는 EMQX ban을 `clientid` 기준으로 겁니다.** clientid에
+  `livesim-` 같은 접두어를 붙이면 그 ban이 가상 기기를 비껴가, 실물이라면 끊겼을 기기가
+  멀쩡히 계속 발행합니다. 폐기 검증이 통과해버리는 셈이라 반드시 접두어 없이 맞춥니다.
+
+(예외: `rehearse`의 위조 JWT 프로브만 임의 clientid를 씁니다 — 등록된 기기의 세션을 끊지
+않기 위해서입니다.)
+
+### 접속·발행 성공 판정은 정직하다
+
+paho는 두 지점에서 조용히 실패합니다: `connect()`는 CONNACK를 기다리지 않고 돌아오고,
+`wait_for_publish()`는 타임아웃에도 예외를 던지지 않습니다. 그대로 두면 **폐기된 기기가
+"접속 완료 · 발행 25건"으로 보이면서 DB에는 0건**이 되는 허위 양성이 생깁니다.
+
+그래서 livesim은 두 곳 모두 브로커 응답을 확인합니다.
+
+- `connect()`는 CONNACK를 최대 10초 기다리고, 거부(rc≠0)나 무응답이면 커넥션을 정리한 뒤
+  예외를 던집니다. ban·인증 실패는 `MQTT 접속 거부 (banned or auth failure): rc=135`처럼
+  이유 코드와 함께 보입니다.
+- `publish()`는 `is_published()`로 PUBACK을 확인하고, 미확인이면 예외를 던집니다.
+
+두 예외 모두 러너의 기존 실패 경로가 받아 **접속 실패 → 미접속 카운트 → 지수 백오프**로
+이어집니다. 즉 폐기된 기기는 로그와 패널에서 정직하게 "안 붙는 기기"로 보입니다.
 
 ### 모듈
 
@@ -41,14 +69,15 @@ DB에 붙지 않고, 관리자 계정도 쓰지 않습니다. **실제 디바이
 | --- | --- |
 | `livesim/config.py` | 환경변수 `Settings`, `devices.yaml` 인벤토리, 시나리오 YAML |
 | `livesim/api.py` | `POST /auth/device/token` 하나뿐 (secret → JWT 교환) |
-| `livesim/profiles.py` | 센서 파형 (일주기 + 결정적 노이즈), IAQ 18종 + 생체 3종 |
+| `livesim/profiles.py` | 센서 파형 + 환경 프리셋 4종, IAQ 18종 + 생체 3종 |
 | `livesim/payload.py` | 페이로드/토픽 빌더, 오버라이드 클램프 |
-| `livesim/device.py` | `LiveDevice` — 발행, 오프라인 버퍼링, batch 재전송 |
+| `livesim/device.py` | `LiveDevice` — 발행, 오프라인 버퍼링, batch 재전송, CONNACK 검증 |
 | `livesim/scheduler.py` | 이벤트 상태 머신 (확률 이벤트 + 수동 조작) |
-| `livesim/control.py` | 파일 기반 제어 채널 (`ctl` ↔ 러너) |
+| `livesim/control.py` | 파일 기반 제어 채널 (`ctl`·패널 ↔ 러너) |
 | `livesim/rehearse.py` | 보안 리허설 3케이스 |
-| `livesim/runner.py` | 메인 루프 — 토큰 교환, 틱 발행, 재접속, 제어 명령 |
-| `livesim/__main__.py` | CLI (`run` / `ctl` / `rehearse`) |
+| `livesim/panel.py` | 로컬 웹 패널 (표준 라이브러리 http.server) |
+| `livesim/runner.py` | 메인 루프 — 토큰 교환, 틱 발행, 재접속, 제어 명령, 프로파일 해석 |
+| `livesim/__main__.py` | CLI (`run` / `ctl` / `rehearse` / `panel`) |
 
 ---
 
@@ -156,6 +185,7 @@ description: 현실적 24시간 운영 패턴
 interval_seconds: 300 # 발행 주기(초), 최소 1
 max_devices: 0 # 0 = 제한 없음
 exclude_devices: [] # devices.yaml에 있지만 이번 실행에서 뺄 device_id
+site_profiles: {} # site_id → 환경 등급 (선택, §4-B). 기기별 지정이 우선
 events:
   - type: dropout # 통신 단절: 버퍼링 → 복구 시 batch 재전송
     per_device_per_day: 0.2
@@ -177,6 +207,9 @@ events:
   DB 컬럼 자릿수로 반올림합니다. 과장된 목표값을 줘도 업로드 검증(422)에 걸리지 않습니다.
 - **`exclude_devices`**: 자격증명을 지우지 않고 일시적으로 재우는 용도입니다. 인벤토리에서 지우면
   나중에 secret을 다시 발급받아야 하므로, 잠깐 빼는 것은 여기서 합니다.
+- **`site_profiles`**: 그 사이트 기기 전체의 상시 환경 등급입니다. 확률 이벤트와 달리 기간이
+  없습니다 — 프리셋 표와 3계층 우선순위는 [§4-B](#환경-프로파일--이-기기가-놓인-상시-환경) 참고.
+  알 수 없는 프리셋 이름은 로딩 단계에서 거부됩니다.
 
 ---
 
@@ -190,12 +223,22 @@ livesim ctl off AQ-GANGNAM-01              # 전원 off (발행 중단 + MQTT �
 livesim ctl on  AQ-GANGNAM-01              # 재기동 (재접속 + 발행 재개)
 livesim ctl dropout AQ-GANGNAM-02 --minutes 15   # 통신 단절 (버퍼 → 복구 시 batch 재전송)
 livesim ctl burst   AQ-GANGNAM-02 --minutes 30   # 오염 급증 (기본 목표치)
+livesim ctl profile AQ-GANGNAM-01 very_bad  # 상시 환경 등급 (기간 없음, §4-B)
+livesim ctl reload                          # devices.yaml 다시 읽기 (기기 불필요)
 livesim ctl status                          # 현재 상태 표로 출력
 
 # 항목별 목표치 지정 (반복 가능). 생략하면 시나리오·내장 기본값을 씁니다.
 livesim ctl burst AQ-GANGNAM-02 --minutes 60 --set pm25=150 --set co2=3000
 livesim ctl burst WB-EUNBIT-01  --minutes 45 --set heart_rate=150
 ```
+
+| 명령 | 대상 | 지속 |
+| --- | --- | --- |
+| `off` / `on` | 기기 | 사람이 바꿀 때까지 |
+| `dropout` / `burst` | 기기 | `--minutes` |
+| `profile` | 기기 | 사람이 바꿀 때까지 (재시작 시 소실) |
+| `reload` | 플릿 전체 | 즉시 1회 |
+| `status` | — | 조회만 |
 
 > 알 수 없는 센서명이나 숫자가 아닌 값은 명령을 넣는 단계에서 거부됩니다. 값은 발행 시
 > ±10% 노이즈를 얹고 센서 범위로 클램프되므로 과장된 목표치도 안전합니다.
@@ -204,12 +247,15 @@ livesim ctl burst WB-EUNBIT-01  --minutes 45 --set heart_rate=150
 
 ```
 시나리오 daily-ops · tick 42 · 갱신 2026-08-13T10:45:22
-DEVICE                 CONN   ONLINE   PEND  EVENT
---------------------------------------------------
-AQ-GANGNAM-01          no     no          0  power_off (수동)
-AQ-GANGNAM-02          yes    no          3  dropout (수동) 177초 남음
-WB-GANGNAM-01          yes    yes         0  -
+DEVICE                 TYPE   CONN   ONLINE   PEND  EVENT
+---------------------------------------------------------
+AQ-GANGNAM-01          FIXED  no     no          0  power_off (수동)
+AQ-GANGNAM-02          FIXED  yes    no          3  dropout (수동) 02:57 남음
+WB-GANGNAM-01          WEAR   yes    yes         0  -
 ```
+
+`TYPE`은 `FIXED`/`PORT`/`WEAR` 축약이고, 남은시간은 **출력하는 시점 기준으로 다시 계산**됩니다
+(`state.json`에 적힌 값은 마지막 틱 시점이라 최대 한 틱만큼 낡았습니다).
 
 ### off와 dropout의 차이
 
@@ -261,14 +307,29 @@ python -m livesim panel --port 9000
 
 | 영역 | 내용 |
 | --- | --- |
-| 상단 요약 | 시나리오명 · tick · 접속 수/전체 · 마지막 갱신 (러너가 없으면 경고) |
+| 상단 요약 | 시나리오명 · tick · 접속 수/전체 · **전원off 수** · 마지막 갱신 (러너가 없으면 경고) |
 | 유형 탭 | `전체` · `고정형(FIXED)` · `이동형(PORTABLE)` · `웨어러블(WEARABLE)` — 괄호 안은 각 유형의 대수 |
+| 사이트 바 | 사이트 선택(`site_id` 앞 8자 + 대수) · 선택 시 **[이 사이트 전체 적용]** 일괄 변경 |
 | 디바이스 카드 | 좌측 색 띠 — 초록=정상, 회색=전원 off, 주황=단절/오프라인, 빨강=비활성 |
-| 카드 배지 | 진행 중 이벤트(수동 여부 포함), 버퍼 건수, 남은 시간(mm:ss, 매초 감소) |
-| 카드 버튼 | 전원 on/off · 단절… · 버스트… (`…`는 카드 안에서 설정 폼이 펼쳐집니다) |
-| 우측 폼 | 새 기기 주입 (시크릿은 password 입력) |
+| 카드 본문 | device_id · 유형/시설 · `site 550e8400…` |
+| 카드 배지 | 진행 중 이벤트(수동 여부 포함), 버퍼 건수, 남은 시간(mm:ss, 매초 감소), **환경 등급**(good은 무표시·moderate 노랑·bad 주황·very_bad 빨강) |
+| 카드 버튼 | 전원 on/off · 단절… · 버스트… (`…`는 카드 안에서 설정 폼이 펼쳐집니다) · 환경 등급 셀렉트 |
+| 우측 폼 | 새 기기 주입 (시크릿은 password 입력, 전원 off로 주입 체크박스) |
 
 2초마다 폴링합니다. 외부 CDN·폰트를 쓰지 않아 오프라인에서도 동작합니다.
+
+#### 조작 중에는 그 영역만 갱신을 멈춥니다
+
+폴링이 화면을 다시 그리면 입력 중이던 값과 포커스가 날아갑니다. 그래서 화면을 독립적으로 다시
+그릴 수 있는 최소 단위(유형 탭 / 사이트 바 / 카드 1장 / 주입 폼)마다 **포커스가 그 안에 있으면
+이번 갱신 주기를 건너뜁니다.** 포커스가 벗어나면 다음 주기부터 정상 갱신됩니다.
+
+- 내용이 그대로면 아예 손대지 않습니다(서명 비교) — 대부분의 카드는 매 폴링마다 아무 일도
+  일어나지 않습니다.
+- 남은시간처럼 자주 바뀌는 값은 노드를 다시 만들지 않고 **텍스트만 갈아끼웁니다.**
+- 보호로 멈춘 카드에는 `갱신 일시정지` 표시가 뜹니다. 셀렉트를 잠깐 스친 정도로 번쩍이지
+  않도록, 폼을 열었거나 1초 이상 머문 경우에만 나타납니다.
+- **전체가 멈추지는 않습니다** — 조작 중이 아닌 카드는 계속 실시간으로 갱신됩니다.
 
 #### 왜 5분 단절은 화면에서 안 보이는가
 
@@ -488,10 +549,10 @@ MQTT_HOST=host.docker.internal
 | 버퍼 | dropout 중이라 로컬에 쌓인 건수 |
 | 재전송 | dropout 종료로 batch 재전송된 건수 |
 | 침묵 | silence로 건너뛴 디바이스 수 |
-| 전원off | `ctl off` 상태인 디바이스 수 |
-| 미접속 | 접속 실패로 이번 틱을 건너뜀 (백오프 재시도 중) |
-| 실패 | 발행 중 예외 (커넥션을 버리고 재교환) |
-| 비활성 | **자격증명이 거부되어 제외됨** — `devices.yaml` 확인 후 재기동 필요 |
+| 전원off | 전원이 꺼진 디바이스 수 (`ctl off` 또는 인벤토리 `power: off`) |
+| 미접속 | 접속 실패로 이번 틱을 건너뜀 (백오프 재시도 중 — **토큰 폐기도 여기로 보입니다**) |
+| 실패 | 발행 중 예외 — PUBACK 미확인 포함 (커넥션을 버리고 재교환) |
+| 비활성 | **자격증명이 4xx로 거부되어 제외됨** — `devices.yaml` 확인 후 재기동 필요 |
 
 ### 장애 복구 동작
 
@@ -520,10 +581,40 @@ MQTT_HOST=host.docker.internal
 
 ---
 
-## 8. ⚠ 백엔드 버전 커플링
+## 8. 운영 런북 — 토큰 폐기(revoke) 대응
 
-**이 저장소는 `aiot-be` 0.1.1 기준으로 검증되었습니다.** 계약이 깨지면 대개 "발행은 성공하는데
-데이터가 안 쌓이는" 조용한 실패로 나타나므로, 백엔드 스키마 변경 시 반드시 점검하세요.
+관리자가 FE/백엔드에서 디바이스 토큰을 폐기하면 livesim은 아래 순서로 반응합니다.
+**livesim 쪽에서 할 일은 없습니다** — 폐기도, 해제 후 복구도 자동으로 따라갑니다.
+
+| 시점 | 무슨 일이 | 어디에 보이나 |
+| --- | --- | --- |
+| 폐기 즉시 | EMQX가 해당 clientid 세션을 끊음 | — (조용함) |
+| 다음 틱 | 발행이 PUBACK을 못 받아 실패 → 커넥션 폐기 | `실패 1`, `발행 실패 (…): MQTT 발행 미확인` |
+| 그다음 시도 | 새 토큰을 받아 재접속하지만 ban에 걸려 CONNACK 거부 | `접속 실패 (…): MQTT 접속 거부 … rc=135` |
+| 이후 | 지수 백오프(5초 → 최대 5분)로 계속 재시도 | `미접속 1` (틱 로그) · 패널에서 회색 카드 |
+| 해제(DELETE) 후 | 다음 재시도가 성공 → 발행 재개 | `접속 완료: …` · `발행` 수 복귀 |
+
+폐기된 기기는 **"접속은 되는데 데이터만 안 쌓이는" 상태로 보이지 않습니다.** CONNACK·PUBACK을
+확인하기 때문에(§1) 정직하게 "안 붙는 기기"로 나타납니다. 이 판정이 제대로 도는지는
+`livesim rehearse`의 SEC-03이 상시 확인합니다.
+
+> `미접속`이 줄지 않고 오래 유지되면 폐기 상태이거나 브로커·백엔드가 내려간 것입니다. 로그의
+> `rc=135`(Not authorized)가 보이면 인증·ban 쪽, `백엔드 통신 실패`면 네트워크 쪽입니다.
+
+주의: clientid에 접두어를 붙이면 이 시나리오가 **재현되지 않습니다**(§1의 접속 규약 참고).
+
+---
+
+## 9. ⚠ 백엔드 버전 커플링
+
+**이 저장소는 `aiot-be` v0.1.8 기준으로 검증되었습니다** (그 이전 v0.1.1·v0.1.5 계약도 이 표를
+따라 유지). 계약이 깨지면 대개 "발행은 성공하는데 데이터가 안 쌓이는" 조용한 실패로 나타나므로,
+백엔드 스키마 변경 시 반드시 점검하세요.
+
+v0.1.5에서 토큰 폐기(EMQX ban, clientid 기준)가, v0.1.8에서 웹훅 키 필수화가 들어왔습니다.
+웹훅 키는 EMQX↔백엔드 구간이라 livesim이 직접 다루지 않지만, **그 설정이 틀리면 발행은
+성공하는데 적재만 0건**이 되므로 증상이 토픽 오류와 똑같이 보입니다 — 적재가 안 될 때는
+livesim 토픽만이 아니라 EMQX 웹훅 설정도 함께 의심하세요.
 
 | 계약 | 위치 | 깨졌을 때 증상 |
 | --- | --- | --- |
@@ -534,13 +625,17 @@ MQTT_HOST=host.docker.internal
 | `captured_at` naive KST (§7) | `runner.kst_now` | 적재 시각 9시간 밀림 |
 | `POST /auth/device/token` → `access_token` | `api.exchange_device_token` | 전 디바이스 미접속 |
 | 배치 토픽 `{"readings": [...]}` | `device.LiveDevice.go_online` | dropout 재전송분만 유실 |
+| clientid 기준 ban (§1·§8) | `runner.make_connector` | 접두어를 붙이면 폐기가 안 먹힘 |
 
 `SENSOR_PROFILES`의 `minimum`/`maximum`은 업로드 DTO의 `@DecimalMin`/`@DecimalMax` 안에,
 `decimals`는 DB 컬럼의 `NUMERIC(x,y)`에 맞춰져 있습니다.
 
 ---
 
-## 9. 0.1 → 0.2 변경점
+## 10. 0.1 → 0.2 변경점 (관리자 계정 제거)
+
+> 버전별 한 줄 요약은 [§12](#12-버전-이력)에 있습니다. 이 절은 가장 큰 경계 변화였던
+> 0.2의 배경을 남겨둔 것입니다.
 
 **관리자 계정 의존을 완전히 제거했습니다.** 0.1은 admin으로 로그인해 디바이스 목록을 조회하고
 시크릿을 발급받았지만, **실제 디바이스는 관리자 계정을 알지 못합니다.** 등록과 발급은 사람이 FE
@@ -572,7 +667,7 @@ MQTT_HOST=host.docker.internal
 
 ---
 
-## 10. 테스트
+## 11. 테스트
 
 ```bash
 pytest
@@ -580,3 +675,19 @@ pytest
 
 모든 테스트는 네트워크 없이 동작합니다. HTTP는 `requests-mock`, MQTT는 페이크 publisher,
 제어 채널은 임시 디렉터리, 이벤트 스케줄러는 주입한 난수 생성기로 검증합니다.
+
+패널의 JS는 문자열 수준으로만 검증할 수 있습니다. **실제로 동작하는지는 브라우저로 확인해야
+합니다** — 완전히 망가진 카운트다운과 열리지 않는 폼이 문자열 테스트를 통과한 전례가 있습니다.
+패널 JS를 고쳤다면 브라우저에서 눈으로 확인하세요.
+
+---
+
+## 12. 버전 이력
+
+| 버전 | 무엇이 바뀌었나 |
+| --- | --- |
+| **0.1** | `aiot-be` 저장소 안의 계약 테스트 시뮬레이터에서 독립 레포로 포팅. DB 의존 제거, 24시간 시나리오 스케줄러 신설 |
+| **0.2** | **관리자 계정 의존 제거** — `devices.yaml` 자격증명 주입, `ctl` 파일 제어 채널, `rehearse` 보안 리허설 (§10) |
+| **0.3** | 로컬 웹 패널(`panel`), 인벤토리 핫 리로드(`ctl reload`)와 패널 주입, 유형 탭·실시간 카운트다운, 수동 이벤트 파라미터화(`--set`) |
+| **0.4** | **환경 프로파일 시스템** — 프리셋 4종, 3계층 우선순위, 사이트 필터·일괄 변경, 프로파일 배지 |
+| 0.4.x | CONNACK·PUBACK 검증(허위 양성 제거), clientid=device_id 정렬, 리렌더 포커스 가드 일반화 |
