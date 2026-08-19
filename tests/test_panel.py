@@ -175,7 +175,8 @@ def test_tabs_filter_by_device_type(panel):
     body = requests.get(base + "/", timeout=5).text
 
     assert "matchesType" in body
-    assert "filter(matchesType)" in body
+    # 유형 필터와 사이트 필터가 함께 걸린다
+    assert "matchesType(d)&&matchesSite(d)" in body
     # 구버전 상태(device_type 없음)는 '전체'에서만 보여야 한다.
     assert "activeType==='ALL'" in body
 
@@ -345,6 +346,62 @@ def test_countdown_skips_the_editing_card(panel):
     body = requests.get(base + "/", timeout=5).text
 
     assert "dataset.did===keep" in body
+
+
+# ---- 환경 프로파일 -----------------------------------------------------
+
+
+def test_cmd_forwards_profile_change(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "profile", "device_id": "AQ-01", "preset": "bad"},
+        timeout=5,
+    )
+
+    assert res.status_code == 200
+    command = control.drain_commands(env.control_dir)[0]
+    assert command.command == "profile"
+    assert command.preset == "bad"
+
+
+def test_cmd_forwards_site_scoped_profile(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "profile", "site_id": "S-1", "preset": "very_bad"},
+        timeout=5,
+    )
+
+    assert res.status_code == 200
+    command = control.drain_commands(env.control_dir)[0]
+    assert command.site_id == "S-1"
+    assert command.preset == "very_bad"
+
+
+def test_cmd_rejects_unknown_preset(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "profile", "device_id": "AQ-01", "preset": "awful"},
+        timeout=5,
+    )
+
+    assert res.status_code == 422
+    assert control.drain_commands(env.control_dir) == []
+
+
+def test_page_exposes_presets_and_site_controls(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert '"presets"' in body and '"very_bad"' in body
+    assert "renderSiteBar" in body
+    assert "bulkProfile" in body
+    assert "matchesSite" in body
+    assert "setProfile" in body
+    assert "envBadge" in body
+    assert "이 사이트 전체 적용" in body
 
 
 def test_cmd_rejects_unknown_type(panel):

@@ -33,7 +33,7 @@ from livesim.config import (
     load_inventory,
     parse_credential,
 )
-from livesim.profiles import DEVICE_FIELDS, SENSOR_PROFILES
+from livesim.profiles import DEVICE_FIELDS, PRESET_NAMES, SENSOR_PROFILES
 
 LOG = logging.getLogger("livesim.panel")
 
@@ -275,6 +275,8 @@ class PanelHandler(BaseHTTPRequestHandler):
         control.write_command(
             self.settings.control_dir, command, device_id, minutes,
             body.get("overrides"),
+            site_id=str(body.get("site_id") or ""),
+            preset=str(body.get("preset") or ""),
         )
         return {"ok": True, "type": command, "device_id": device_id}
 
@@ -332,6 +334,7 @@ def _sensor_meta() -> str:
             },
             "fields": {key: list(value) for key, value in DEVICE_FIELDS.items()},
             "burst_defaults": control.DEFAULT_BURST_OVERRIDES,
+            "presets": list(PRESET_NAMES),
         },
         ensure_ascii=False,
     )
@@ -409,6 +412,14 @@ border-radius:6px}
 .row .x{padding:2px 7px;font-size:11px;line-height:1.2}
 .formhint{color:var(--dim);font-size:10px;line-height:1.5;margin:2px 0 8px}
 .paused{color:var(--warn);font-size:10px;margin:0 0 8px}
+.env{border:1px solid transparent}
+.env.moderate{background:#3a3411;color:#e3c74a;border-color:#5c5220}
+.env.bad{background:#3d2a11;color:var(--warn);border-color:#6b4718}
+.env.very_bad{background:#3f1717;color:#ff7b7b;border-color:#6e2222}
+.site{color:var(--dim);font-size:10px;margin-top:2px;font-family:ui-monospace,monospace}
+.sitebar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px}
+.sitebar .lbl{color:var(--dim);font-size:11px}
+.sitebar select{width:auto;padding:4px 8px;font-size:12px}
 .go{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:600}
 </style></head><body>
 <header>
@@ -418,6 +429,7 @@ border-radius:6px}
 <main>
   <section>
     <div class="tabs" id="tabs"></div>
+    <div class="sitebar" id="sitebar"></div>
     <div class="grid" id="grid"></div>
   </section>
   <aside>
@@ -478,6 +490,59 @@ function renderTabs(devs){
   }).join('');
 }
 
+// ---- 사이트 필터 · 환경 등급 -------------------------------------------
+//
+// 사이트 이름은 알 수 없다 (admin API를 부르지 않는 것이 이 도구의 원칙).
+// site_id 앞 8자와 소속 대수로 라벨을 만들고, 기기 이름 접두어로 사람이 알아본다.
+const SITE_ALL='ALL';
+const SITE_KEY='livesim.panel.site';
+let activeSite=SITE_ALL;
+try{ const saved=localStorage.getItem(SITE_KEY); if(saved) activeSite=saved; }catch(e){}
+
+function shortSite(id){ return (id||'').slice(0,8) }
+function matchesSite(d){ return activeSite===SITE_ALL || (d.site_id||'')===activeSite }
+function selectSite(id){
+  activeSite=id;
+  try{ localStorage.setItem(SITE_KEY,id) }catch(e){}
+  if(lastState) render(lastState,inv,true);
+}
+function renderSiteBar(devs){
+  const counts={};
+  devs.forEach(d=>{ const s=d.site_id||''; if(s) counts[s]=(counts[s]||0)+1 });
+  const ids=Object.keys(counts).sort();
+  if(!ids.length){ $('#sitebar').innerHTML=''; return; }
+  const options=[`<option value="${SITE_ALL}">전체 사이트 (${devs.length}대)</option>`]
+    .concat(ids.map(id=>'<option value="'+esc(id)+'"'+
+      (activeSite===id?' selected':'')+'>'+esc(shortSite(id))+'… ('+counts[id]+'대)</option>'));
+  const presets=META.presets.map(p=>'<option>'+esc(p)+'</option>').join('');
+  $('#sitebar').innerHTML=
+    '<span class="lbl">사이트</span>'+
+    '<select onchange="selectSite(this.value)">'+options.join('')+'</select>'+
+    (activeSite===SITE_ALL ? '<span class="lbl">— 사이트를 고르면 일괄 변경할 수 있습니다</span>'
+      : '<span class="lbl">환경 일괄</span>'+
+        '<select id="bulkpreset">'+presets+'</select>'+
+        '<button onclick="bulkProfile()">이 사이트 전체 적용 ('+
+          (counts[activeSite]||0)+'대)</button>');
+}
+async function bulkProfile(){
+  const preset=$('#bulkpreset')?.value;
+  if(!preset || activeSite===SITE_ALL) return;
+  try{
+    await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({type:'profile',site_id:activeSite,preset})});
+    say('사이트 '+shortSite(activeSite)+'… 환경 등급 '+preset+' 적용',false);
+    setTimeout(refresh,600);
+  }catch(e){say(e.message,true)}
+}
+function setProfile(device_id,preset){
+  cmd('profile',device_id,null,null,preset);
+}
+function envBadge(d){
+  const p=d.profile;
+  if(!p || p===META.presets[0]) return '';   // good은 무표시
+  return '<span class="badge env '+esc(p)+'">'+esc(p)+'</span>';
+}
+
 function cls(d){
   if(d.disabled) return 'bad';
   if(d.event==='power_off') return 'offp';
@@ -531,10 +596,10 @@ function badges(d){
   return h;
 }
 
-async function cmd(type,device_id,minutes,overrides){
+async function cmd(type,device_id,minutes,overrides,preset){
   try{
     await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type,device_id,minutes,overrides})});
+      body:JSON.stringify({type,device_id,minutes,overrides,preset})});
     say('명령 전달: '+type+' '+(device_id||''),false);
     openForm=null;
     setTimeout(refresh,600);
@@ -673,7 +738,8 @@ function render(state,invList,force){
     : invList.map(i=>({device_id:i.device_id,device_type:i.device_type,
         connected:false,online:false,pending:0,event:null,disabled:false}));
   renderTabs(all);
-  const rows = all.filter(matchesType);
+  renderSiteBar(all);
+  const rows = all.filter(d=>matchesType(d)&&matchesSite(d));
   if(!all.length){
     $('#grid').innerHTML='<div class="empty">등록된 기기가 없습니다. 오른쪽에서 주입하세요.</div>';
     return;
@@ -692,16 +758,23 @@ function cardHtml(d,interval){
   const id=esc(d.device_id);
   const dropout=openForm===formKey(d.device_id,'dropout');
   const burst=openForm===formKey(d.device_id,'burst');
+  const site=d.site_id||info.site_id||'';
+  const presetOptions=META.presets.map(p=>
+    '<option'+(p===(d.profile||META.presets[0])?' selected':'')+'>'+esc(p)+'</option>'
+  ).join('');
   return '<div class="card '+cls(d)+'" data-did="'+id+'">'+
     '<div class="did">'+id+'</div>'+
     '<div class="meta">'+esc(d.device_type||info.device_type||'')+
       (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
-    '<div>'+badges(d)+'</div>'+
+    (site?'<div class="site">site '+esc(shortSite(site))+'…</div>':'')+
+    '<div>'+badges(d)+envBadge(d)+'</div>'+
     '<div class="btns">'+
       '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
       '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
       '<button onclick="toggleForm(\\''+id+'\\',\\'dropout\\')">단절…</button>'+
       '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
+      '<select title="환경 등급" onchange="setProfile(\\''+id+'\\',this.value)">'+
+        presetOptions+'</select>'+
     '</div>'+
     (dropout?dropoutForm(d,interval):'')+
     (burst?burstForm(d,interval):'')+
@@ -767,7 +840,8 @@ $('#inject').onclick=async()=>{
 
 // 카드·탭·폼의 인라인 onclick/oninput에서 부른다
 Object.assign(window,{cmd,selectType,toggleForm,setMinutes,setTarget,
-                      dropTarget,addTarget,draftFor,pointsHint});
+                      dropTarget,addTarget,draftFor,pointsHint,
+                      selectSite,bulkProfile,setProfile});
 refresh();
 setInterval(refresh,2000);        // 데이터 폴링
 setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재렌더 없음)
