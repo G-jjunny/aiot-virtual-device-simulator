@@ -126,7 +126,8 @@ def test_page_counts_down_every_second_separately_from_polling(panel):
     base, _ = panel
     body = requests.get(base + "/", timeout=5).text
 
-    assert "setInterval(tickCountdowns,1000)" in body
+    assert "tickCountdowns();" in body
+    assert "},1000);" in body
     assert "setInterval(refresh,2000)" in body
 
 
@@ -322,23 +323,25 @@ def test_editing_card_is_excluded_from_rerender(panel):
 
     assert "function renderGrid" in body
     assert "editingId()" in body
-    assert "data-did=" in body                        # 카드별 식별자
-    assert "if(d.device_id===keep) return;" in body   # 편집 중 카드 건너뛰기
+    assert "data-did=" in body                          # 카드별 식별자
+    assert "cardProtected(node,d.device_id)" in body    # 편집 중 카드 건너뛰기
 
 
 def test_other_cards_keep_updating_while_editing(panel):
-    """전체 정지 금지 — 편집 중인 카드 하나만 보호한다."""
+    """전체 정지 금지 — 보호된 단위 하나만 건너뛴다."""
     base, _ = panel
     body = requests.get(base + "/", timeout=5).text
 
-    assert "node.outerHTML!==html" in body
+    # 서명이 바뀐 카드는 다시 그리고, 같으면 손대지 않는다
+    assert "node.dataset.sig===signature" in body
+    assert "node.outerHTML=cardHtml(d,interval,signature)" in body
 
 
 def test_editing_card_shows_paused_notice(panel):
     base, _ = panel
     body = requests.get(base + "/", timeout=5).text
 
-    assert "갱신 일시정지(편집 중)" in body
+    assert "갱신 일시정지" in body
 
 
 def test_countdown_skips_the_editing_card(panel):
@@ -346,6 +349,71 @@ def test_countdown_skips_the_editing_card(panel):
     body = requests.get(base + "/", timeout=5).text
 
     assert "dataset.did===keep" in body
+
+
+# ---- 포커스 가드 (리렌더 진입점 일반화) ---------------------------------
+
+
+def test_focus_guard_exists_at_the_rerender_entry(panel):
+    """컨트롤이 늘 때마다 플래그를 다는 대신 진입점에서 한 번에 막는다.
+
+    같은 실패가 두 번 났다 — 편집 폼, 그리고 0.4.0의 프로파일 셀렉트·사이트 필터.
+    """
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "function holdsFocus" in body
+    assert "document.activeElement" in body
+    assert "node.contains(active)" in body
+
+
+def test_every_rerender_unit_is_marked(panel):
+    """단위마다 data-unit이 붙어 있어야 새 컨트롤도 자동으로 보호된다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    for unit in ('data-unit="tabs"', 'data-unit="sitebar"',
+                 'data-unit="card"', 'data-unit="inject"'):
+        assert unit in body, unit
+
+
+def test_units_skip_when_unchanged_then_when_focused(panel):
+    """서명이 같으면 무작업, 다르면 포커스 여부로 스킵 — paintUnit 한 곳에서."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "function paintUnit" in body
+    assert "node.dataset.sig===signature" in body
+    assert "if(!force && holdsFocus(node)) return false" in body
+
+
+def test_toolbar_units_go_through_the_guard(panel):
+    """탭·사이트 필터도 카드와 같은 경로로 보호된다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "paintUnit($('#tabs')" in body
+    assert "paintUnit($('#sitebar')" in body
+
+
+def test_pause_notice_is_debounced(panel):
+    """셀렉트를 잠깐 스친 정도로 배지가 번쩍이면 안 된다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "PAUSE_NOTICE_DELAY" in body
+    assert "focusedSince" in body
+    assert "updatePauseNotices" in body
+
+
+def test_countdown_patches_text_not_nodes(panel):
+    """자주 바뀌는 값은 노드를 다시 만들지 않는다 — 보호 필요 자체를 줄인다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "el.textContent=fmtLeft(left)" in body
+    # 카드 서명에서 카운트다운 '텍스트'는 빠져 있어야 매초 재생성되지 않는다
+    assert "function cardSignature" in body
 
 
 # ---- 환경 프로파일 -----------------------------------------------------

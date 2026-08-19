@@ -411,7 +411,8 @@ border-radius:6px}
 .row .rng{color:var(--dim);font-size:10px;white-space:nowrap}
 .row .x{padding:2px 7px;font-size:11px;line-height:1.2}
 .formhint{color:var(--dim);font-size:10px;line-height:1.5;margin:2px 0 8px}
-.paused{color:var(--warn);font-size:10px;margin:0 0 8px}
+.paused{color:var(--warn);font-size:10px;margin:0 0 6px}
+.hidden{display:none}
 .env{border:1px solid transparent}
 .env.moderate{background:#3a3411;color:#e3c74a;border-color:#5c5220}
 .env.bad{background:#3d2a11;color:var(--warn);border-color:#6b4718}
@@ -428,11 +429,11 @@ border-radius:6px}
 </header>
 <main>
   <section>
-    <div class="tabs" id="tabs"></div>
-    <div class="sitebar" id="sitebar"></div>
+    <div class="tabs" id="tabs" data-unit="tabs"></div>
+    <div class="sitebar" id="sitebar" data-unit="sitebar"></div>
     <div class="grid" id="grid"></div>
   </section>
-  <aside>
+  <aside data-unit="inject">
     <h2>새 가상 기기 주입</h2>
     <p>FE 관리자 화면에서 디바이스를 등록하고 발급받은 시크릿을 붙여넣으세요.
        devices.yaml에 추가된 뒤 러너가 자동으로 리로드합니다.</p>
@@ -480,14 +481,40 @@ function selectType(t){
   try{ localStorage.setItem(TYPE_KEY,t) }catch(e){}
   if(lastState) render(lastState,inv,true);
 }
-function renderTabs(devs){
-  $('#tabs').innerHTML=TYPE_TABS.map(([key,label])=>{
-    const n=key==='ALL' ? devs.length
-      : devs.filter(d=>(d.device_type||'')===key).length;
-    return '<button class="tab'+(activeType===key?' sel':'')+
+// ---- 리렌더 단위와 포커스 가드 -------------------------------------------
+//
+// 폴링 리렌더가 사용자가 조작 중인 컨트롤을 파괴하는 문제가 두 번 났다. 컨트롤이
+// 늘 때마다 플래그를 하나씩 다는 대신, **리렌더 진입점**에서 한 번에 막는다.
+//
+// 규칙: 화면을 독립적으로 다시 그릴 수 있는 최소 단위마다 data-unit을 붙이고,
+//   1) 내용이 그대로면 아예 손대지 않는다 (서명 비교)
+//   2) 달라졌더라도 그 단위 안에 포커스가 있으면 이번 사이클은 건너뛴다
+//   3) 포커스가 벗어나면 다음 사이클에 정상 반영
+// 앞으로 어떤 컨트롤을 추가해도 그 단위 안에 있기만 하면 자동으로 보호된다.
+
+function holdsFocus(node){
+  const active=document.activeElement;
+  return !!(node && active && active!==document.body && node.contains(active));
+}
+
+/** 단위 하나를 서명 기반으로 갱신한다. 실제로 다시 그렸으면 true. */
+function paintUnit(node, signature, build, force){
+  if(!node) return false;
+  if(node.dataset.sig===signature) return false;   // 내용 동일 — 무작업
+  if(!force && holdsFocus(node)) return false;     // 조작 중 — 다음 사이클
+  node.innerHTML=build();
+  node.dataset.sig=signature;
+  return true;
+}
+
+function renderTabs(devs,force){
+  const counts=TYPE_TABS.map(([key])=>
+    key==='ALL' ? devs.length : devs.filter(d=>(d.device_type||'')===key).length);
+  paintUnit($('#tabs'), JSON.stringify([counts,activeType]), ()=>
+    TYPE_TABS.map(([key,label],i)=>
+      '<button class="tab'+(activeType===key?' sel':'')+
       '" onclick="selectType(\\''+key+'\\')">'+label+
-      '<span class="n">'+n+'</span></button>';
-  }).join('');
+      '<span class="n">'+counts[i]+'</span></button>').join(''), force);
 }
 
 // ---- 사이트 필터 · 환경 등급 -------------------------------------------
@@ -506,23 +533,27 @@ function selectSite(id){
   try{ localStorage.setItem(SITE_KEY,id) }catch(e){}
   if(lastState) render(lastState,inv,true);
 }
-function renderSiteBar(devs){
+function renderSiteBar(devs,force){
   const counts={};
   devs.forEach(d=>{ const s=d.site_id||''; if(s) counts[s]=(counts[s]||0)+1 });
   const ids=Object.keys(counts).sort();
-  if(!ids.length){ $('#sitebar').innerHTML=''; return; }
-  const options=[`<option value="${SITE_ALL}">전체 사이트 (${devs.length}대)</option>`]
-    .concat(ids.map(id=>'<option value="'+esc(id)+'"'+
-      (activeSite===id?' selected':'')+'>'+esc(shortSite(id))+'… ('+counts[id]+'대)</option>'));
-  const presets=META.presets.map(p=>'<option>'+esc(p)+'</option>').join('');
-  $('#sitebar').innerHTML=
-    '<span class="lbl">사이트</span>'+
-    '<select onchange="selectSite(this.value)">'+options.join('')+'</select>'+
-    (activeSite===SITE_ALL ? '<span class="lbl">— 사이트를 고르면 일괄 변경할 수 있습니다</span>'
-      : '<span class="lbl">환경 일괄</span>'+
-        '<select id="bulkpreset">'+presets+'</select>'+
-        '<button onclick="bulkProfile()">이 사이트 전체 적용 ('+
-          (counts[activeSite]||0)+'대)</button>');
+  const signature=JSON.stringify([ids.map(id=>[id,counts[id]]),devs.length,activeSite]);
+  paintUnit($('#sitebar'), signature, ()=>{
+    if(!ids.length) return '';
+    const options=['<option value="'+SITE_ALL+'">전체 사이트 ('+devs.length+'대)</option>']
+      .concat(ids.map(id=>'<option value="'+esc(id)+'"'+
+        (activeSite===id?' selected':'')+'>'+esc(shortSite(id))+'… ('+
+        counts[id]+'대)</option>'));
+    const presets=META.presets.map(p=>'<option>'+esc(p)+'</option>').join('');
+    return '<span class="lbl">사이트</span>'+
+      '<select onchange="selectSite(this.value)">'+options.join('')+'</select>'+
+      (activeSite===SITE_ALL
+        ? '<span class="lbl">— 사이트를 고르면 일괄 변경할 수 있습니다</span>'
+        : '<span class="lbl">환경 일괄</span>'+
+          '<select id="bulkpreset">'+presets+'</select>'+
+          '<button onclick="bulkProfile()">이 사이트 전체 적용 ('+
+            (counts[activeSite]||0)+'대)</button>');
+  }, force);
 }
 async function bulkProfile(){
   const preset=$('#bulkpreset')?.value;
@@ -666,7 +697,6 @@ function numInput(handler,value,extra){
 function dropoutForm(d,interval){
   const cur=draftFor(d.device_id,'dropout');
   return '<div class="panelform">'+
-    '<div class="paused">갱신 일시정지(편집 중) — 이 카드의 상태는 낡을 수 있습니다</div>'+
     '<div class="row"><label>지속(분)</label>'+
       numInput("setMinutes('"+esc(d.device_id)+"','dropout',this.value);"+
                "this.closest('.panelform').querySelector('.formhint').textContent="+
@@ -705,7 +735,6 @@ function burstForm(d,interval){
       addable.map(n=>'<option>'+esc(n)+'</option>').join('')+'</select></div>'
     : '';
   return '<div class="panelform">'+
-    '<div class="paused">갱신 일시정지(편집 중) — 이 카드의 상태는 낡을 수 있습니다</div>'+
     '<div class="row"><label>지속(분)</label>'+
       numInput("setMinutes('"+esc(id)+"','burst',this.value);"+
                "this.closest('.panelform').querySelector('.formhint').textContent="+
@@ -737,8 +766,8 @@ function render(state,invList,force){
   const all = running ? devs
     : invList.map(i=>({device_id:i.device_id,device_type:i.device_type,
         connected:false,online:false,pending:0,event:null,disabled:false}));
-  renderTabs(all);
-  renderSiteBar(all);
+  renderTabs(all,force);
+  renderSiteBar(all,force);
   const rows = all.filter(d=>matchesType(d)&&matchesSite(d));
   if(!all.length){
     $('#grid').innerHTML='<div class="empty">등록된 기기가 없습니다. 오른쪽에서 주입하세요.</div>';
@@ -750,10 +779,24 @@ function render(state,invList,force){
   }
   const interval=state.interval_seconds||300;
   renderGrid(rows,interval,force);
-  tickCountdowns();   // 새로 그린 배지에 즉시 숫자를 채운다
+  tickCountdowns();      // 새로 그린 배지에 즉시 숫자를 채운다
+  updatePauseNotices();  // 폼을 연 직후 1초를 기다리지 않고 바로 표시
 }
 
-function cardHtml(d,interval){
+/** 카드 1장의 상태 서명. 매초 변하는 카운트다운 '텍스트'는 일부러 뺀다 —
+ *  넣으면 카드가 매 폴링마다 다시 그려져 그 안의 컨트롤 포커스가 날아간다.
+ *  (절대 종료시각은 넣는다: 이벤트가 바뀌면 다시 그려야 하므로.) */
+function cardSignature(d,info){
+  return JSON.stringify([
+    d.device_id,d.device_type,d.site_id,d.profile,d.connected,d.online,d.pending,
+    d.event,d.event_manual,d.event_ends_at,d.disabled,d.disabled_reason,
+    info.device_type,info.facility_type,
+    openForm===formKey(d.device_id,'dropout'),
+    openForm===formKey(d.device_id,'burst'),
+  ]);
+}
+
+function cardHtml(d,interval,signature){
   const info=inv.find(i=>i.device_id===d.device_id)||{};
   const id=esc(d.device_id);
   const dropout=openForm===formKey(d.device_id,'dropout');
@@ -762,7 +805,9 @@ function cardHtml(d,interval){
   const presetOptions=META.presets.map(p=>
     '<option'+(p===(d.profile||META.presets[0])?' selected':'')+'>'+esc(p)+'</option>'
   ).join('');
-  return '<div class="card '+cls(d)+'" data-did="'+id+'">'+
+  return '<div class="card '+cls(d)+'" data-unit="card" data-did="'+id+'"'+
+      ' data-sig="'+esc(signature||cardSignature(d,info))+'">'+
+    '<div class="paused hidden">갱신 일시정지 — 이 카드의 상태는 낡을 수 있습니다</div>'+
     '<div class="did">'+id+'</div>'+
     '<div class="meta">'+esc(d.device_type||info.device_type||'')+
       (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
@@ -781,33 +826,54 @@ function cardHtml(d,interval){
   '</div>';
 }
 
-// 편집 중인 카드는 재렌더에서 제외한다.
-//
-// 2초 폴링이 그리드를 통째로 다시 그리면, 열려 있는 폼의 입력값과 포커스가
-// 매번 날아가 편집 자체가 불가능하다. 그 카드의 DOM 노드만 손대지 않고
-// 나머지 카드는 평소대로 갱신한다 — 전체를 멈추면 다른 기기 상태가 낡는다.
 function editingId(){ return openForm ? openForm.split('|')[0] : null }
+
+/** 이 카드를 이번 사이클에 건드리면 안 되는가 (포커스 가드 ∪ 폼 열림). */
+function cardProtected(node,device_id){
+  return holdsFocus(node) || editingId()===device_id;
+}
 
 function renderGrid(rows,interval,force){
   const grid=$('#grid');
-  // force: 사용자가 직접 일으킨 렌더(폼 열기/닫기, 항목 추가·제거, 탭 전환).
-  // 이때는 편집 중인 카드도 다시 그려야 한다 — 안 그리면 폼을 열라는 조작이
-  // 바로 그 '편집 중 보호'에 걸려 아무 일도 일어나지 않는다.
-  const keep=force?null:editingId();
   const wanted=rows.map(d=>d.device_id).join('\\u0000');
   const current=[...grid.children].map(n=>n.dataset.did||'').join('\\u0000');
 
   if(wanted!==current){
-    // 구성(대수·순서·탭 필터)이 바뀌면 통째로 다시 그린다. 편집 중이었다면
-    // 폼은 닫히지만 입력값은 draft에 남아 다시 열면 그대로다.
+    // 구성(대수·순서·필터)이 바뀌면 통째로 다시 그린다. 편집 중이었다면 폼은
+    // 닫히지만 입력값은 draft에 남아 다시 열면 그대로다.
     grid.innerHTML=rows.map(d=>cardHtml(d,interval)).join('');
     return;
   }
   rows.forEach((d,index)=>{
-    if(d.device_id===keep) return;              // 편집 중 — 건드리지 않는다
     const node=grid.children[index];
-    const html=cardHtml(d,interval);
-    if(node.outerHTML!==html) node.outerHTML=html;
+    const info=inv.find(i=>i.device_id===d.device_id)||{};
+    const signature=cardSignature(d,info);
+    if(node.dataset.sig===signature) return;                  // 상태 동일 — 무작업
+    if(!force && cardProtected(node,d.device_id)) return;     // 조작 중 — 다음 사이클
+    node.outerHTML=cardHtml(d,interval,signature);
+  });
+}
+
+// 스킵된 단위에 "갱신 일시정지"를 띄운다. 셀렉트를 잠깐 스친 정도로 배지가
+// 번쩍이지 않도록, 폼이 열려 있거나 같은 단위에 1초 이상 머문 경우만 표시한다.
+const PAUSE_NOTICE_DELAY = 1000;
+let focusedUnit=null, focusedSince=0;
+
+function trackFocus(){
+  const active=document.activeElement;
+  const unit=(active&&active!==document.body)
+    ? active.closest('[data-unit]') : null;
+  if(unit!==focusedUnit){ focusedUnit=unit; focusedSince=Date.now(); }
+}
+
+function updatePauseNotices(){
+  trackFocus();
+  const held=focusedUnit && (Date.now()-focusedSince)>=PAUSE_NOTICE_DELAY;
+  document.querySelectorAll('.card[data-unit]').forEach(card=>{
+    const notice=card.querySelector('.paused');
+    if(!notice) return;
+    const paused=editingId()===card.dataset.did || (held && focusedUnit===card);
+    notice.classList.toggle('hidden',!paused);
   });
 }
 
@@ -844,7 +910,10 @@ Object.assign(window,{cmd,selectType,toggleForm,setMinutes,setTarget,
                       selectSite,bulkProfile,setProfile});
 refresh();
 setInterval(refresh,2000);        // 데이터 폴링
-setInterval(tickCountdowns,1000); // 남은시간만 매초 다시 계산 (재렌더 없음)
+setInterval(()=>{                 // 남은시간은 textContent만 패치 (노드 재생성 없음)
+  tickCountdowns();
+  updatePauseNotices();
+},1000);
 </script></body></html>
 """
     .replace(
