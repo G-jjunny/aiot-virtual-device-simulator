@@ -133,6 +133,19 @@ def test_ctl_reload_needs_no_device():
     assert not hasattr(args, "device_id")
 
 
+def test_ctl_profile_parses():
+    args = parse(["ctl", "profile", "AQ-01", "bad"])
+
+    assert args.ctl_command == "profile"
+    assert args.device_id == "AQ-01"
+    assert args.preset == "bad"
+
+
+def test_ctl_profile_rejects_unknown_preset():
+    with pytest.raises(SystemExit):
+        parse(["ctl", "profile", "AQ-01", "awful"])
+
+
 def test_ctl_without_subcommand_is_rejected():
     with pytest.raises(SystemExit):
         parse(["ctl"])

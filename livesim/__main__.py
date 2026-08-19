@@ -32,6 +32,7 @@ from livesim.config import (
 )
 from livesim.panel import DEFAULT_HOST as PANEL_DEFAULT_HOST
 from livesim.panel import DEFAULT_PORT as PANEL_DEFAULT_PORT
+from livesim.profiles import PRESET_NAMES
 from livesim.rehearse import rehearse
 from livesim.runner import RunnerError, run, select_devices
 
@@ -141,10 +142,14 @@ def cmd_ctl(args: argparse.Namespace) -> int:
     minutes = getattr(args, "minutes", None)
     device_id = getattr(args, "device_id", "")
     overrides = parse_set_options(getattr(args, "set", None))
+    preset = getattr(args, "preset", "")
     control.write_command(
-        settings.control_dir, args.ctl_command, device_id, minutes, overrides
+        settings.control_dir, args.ctl_command, device_id, minutes, overrides,
+        preset=preset,
     )
     suffix = f" ({minutes:g}분)" if minutes is not None else ""
+    if preset:
+        suffix = f" [{preset}]"
     target = f" → {device_id}" if device_id else ""
     targets = (
         " " + ", ".join(f"{k}={v:g}" for k, v in overrides.items()) if overrides else ""
@@ -284,6 +289,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="센서별 목표치 (반복 가능: --set pm25=150 --set co2=3000). "
              "생략하면 시나리오·내장 기본값",
     )
+    profile_parser = ctl_sub.add_parser(
+        control.PROFILE, help="환경 등급 변경 (상시 — 기간 없음, 재시작 시 소실)"
+    )
+    profile_parser.add_argument("device_id")
+    profile_parser.add_argument("preset", choices=PRESET_NAMES)
+
     ctl_sub.add_parser("status", help="state.json을 표로 출력")
     ctl_sub.add_parser(
         control.RELOAD, help="devices.yaml을 다시 읽어 플릿에 반영 (device_id 불필요)"

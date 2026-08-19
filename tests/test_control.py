@@ -219,6 +219,52 @@ def test_parse_overrides_rejects_non_mapping():
         control.parse_overrides([("pm25", 1)])
 
 
+# ---- 환경 프로파일 명령 --------------------------------------------------
+
+
+def test_profile_command_roundtrip(tmp_path):
+    control.write_command(tmp_path, control.PROFILE, "AQ-01", preset="bad")
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.command == "profile"
+    assert command.device_id == "AQ-01"
+    assert command.preset == "bad"
+
+
+def test_site_scoped_profile_command_roundtrip(tmp_path):
+    control.write_command(tmp_path, control.PROFILE, site_id="S-1", preset="very_bad")
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.site_id == "S-1"
+    assert command.device_id == ""
+    assert command.preset == "very_bad"
+
+
+def test_profile_command_requires_a_target(tmp_path):
+    with pytest.raises(control.ControlError, match="device_id 또는 site_id"):
+        control.write_command(tmp_path, control.PROFILE, preset="bad")
+
+
+def test_profile_command_rejects_unknown_preset(tmp_path):
+    with pytest.raises(control.ControlError, match="환경 프리셋"):
+        control.write_command(tmp_path, control.PROFILE, "AQ-01", preset="awful")
+
+    assert list(tmp_path.glob("cmd-*.json")) == []
+
+
+def test_older_command_without_profile_fields_still_reads(tmp_path):
+    (tmp_path / "cmd-old.json").write_text(
+        json.dumps({"command": "off", "device_id": "AQ-01"}), encoding="utf-8"
+    )
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.preset == ""
+    assert command.site_id == ""
+
+
 # ---- 유형 축약 ---------------------------------------------------------
 
 

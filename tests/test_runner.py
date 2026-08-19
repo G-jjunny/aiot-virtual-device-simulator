@@ -87,6 +87,114 @@ def make_runner(device_ids, events=(), connector=None, seed: int = 1, **kwargs):
     return runner, connector
 
 
+# ---- 환경 프로파일 3계층 -------------------------------------------------
+
+
+def cred(device_id="AQ-1", profile=None, site_id="S-1"):
+    return DeviceCredential(
+        device_id=device_id, secret="s", site_id=site_id,
+        device_type="FIXED", facility_type="OFFICE", profile=profile,
+    )
+
+
+def profile_runner(credentials, site_profiles=None, control_dir=None):
+    scen = Scenario(
+        name="t", description="", interval_seconds=INTERVAL, max_devices=0,
+        exclude_devices=(), events=(), site_profiles=site_profiles or {},
+    )
+    connector = FakeConnector()
+    runner = Runner(scen, credentials, connector, rng=random.Random(1),
+                    clock=lambda: 0.0, control_dir=control_dir)
+    runner.start()
+    return runner, connector
+
+
+def test_profile_defaults_to_good():
+    runner, _ = profile_runner([cred()])
+    assert runner.sessions["AQ-1"].profile == "good"
+
+
+def test_site_profile_applies_to_its_devices():
+    runner, _ = profile_runner([cred()], site_profiles={"S-1": "bad"})
+    assert runner.sessions["AQ-1"].profile == "bad"
+
+
+def test_device_profile_beats_site_profile():
+    runner, _ = profile_runner([cred(profile="moderate")], site_profiles={"S-1": "bad"})
+    assert runner.sessions["AQ-1"].profile == "moderate"
+
+
+def test_explicit_good_beats_site_profile():
+    """명시한 good은 미지정과 다르다 — 사이트 지정을 이겨야 한다."""
+    runner, _ = profile_runner([cred(profile="good")],
+                               site_profiles={"S-1": "very_bad"})
+    assert runner.sessions["AQ-1"].profile == "good"
+
+
+def test_runtime_override_beats_everything(tmp_path):
+    runner, _ = profile_runner([cred(profile="moderate")],
+                               site_profiles={"S-1": "bad"},
+                               control_dir=str(tmp_path))
+
+    control.write_command(tmp_path, control.PROFILE, "AQ-1", preset="very_bad")
+    runner.drain_control()
+
+    assert runner.sessions["AQ-1"].profile == "very_bad"
+
+
+def test_profile_change_affects_published_values(tmp_path):
+    runner, connector = profile_runner([cred()], control_dir=str(tmp_path))
+    runner.tick(TS, now=0.0)
+    clean = json.loads(connector.publishers[0].published[0][1])["pm25"]
+
+    control.write_command(tmp_path, control.PROFILE, "AQ-1", preset="very_bad")
+    runner.drain_control()
+    runner.tick(TS, now=300.0)
+
+    polluted = json.loads(connector.publishers[0].published[-1][1])["pm25"]
+    assert polluted > clean * 2
+
+
+def test_site_scoped_profile_command_hits_the_whole_site(tmp_path):
+    runner, _ = profile_runner(
+        [cred("AQ-1", site_id="S-1"), cred("AQ-2", site_id="S-1"),
+         cred("AQ-3", site_id="S-2")],
+        control_dir=str(tmp_path),
+    )
+
+    control.write_command(tmp_path, control.PROFILE, site_id="S-1", preset="bad")
+    runner.drain_control()
+
+    assert runner.sessions["AQ-1"].profile == "bad"
+    assert runner.sessions["AQ-2"].profile == "bad"
+    assert runner.sessions["AQ-3"].profile == "good"   # 다른 사이트는 그대로
+
+
+def test_burst_overrides_win_over_the_profile_baseline(tmp_path):
+    """버스트는 프로파일 기준선 '위에' 덮인다."""
+    runner, connector = profile_runner([cred(profile="very_bad")],
+                                       control_dir=str(tmp_path))
+
+    control.write_command(
+        tmp_path, control.BURST, "AQ-1", minutes=60, overrides={"pm25": 30.0}
+    )
+    runner.drain_control()
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    assert 27.0 <= payload["pm25"] <= 33.0        # very_bad(100)이 아니라 명령의 30
+    assert payload["co2"] > 2000                  # 덮이지 않은 지표는 프로파일 유지
+
+
+def test_snapshot_exposes_profile_and_site(tmp_path):
+    runner, _ = profile_runner([cred(profile="bad")], control_dir=str(tmp_path))
+
+    device = runner.snapshot()["devices"][0]
+
+    assert device["profile"] == "bad"
+    assert device["site_id"] == "S-1"
+
+
 # ---- 인벤토리 핫 리로드 -------------------------------------------------
 
 

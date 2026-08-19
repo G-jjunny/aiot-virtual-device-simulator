@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from livesim.profiles import SENSOR_PROFILES
+from livesim.profiles import PRESET_NAMES, SENSOR_PROFILES
 
 LOG = logging.getLogger("livesim.control")
 
@@ -32,10 +32,14 @@ ON = "on"
 DROPOUT = "dropout"
 BURST = "burst"
 RELOAD = "reload"
-COMMANDS = (OFF, ON, DROPOUT, BURST, RELOAD)
+PROFILE = "profile"
+COMMANDS = (OFF, ON, DROPOUT, BURST, RELOAD, PROFILE)
 
 DEVICE_COMMANDS = (OFF, ON, DROPOUT, BURST)
-"""대상 device_id가 필요한 명령. reload는 플릿 전체에 적용되므로 제외."""
+"""대상 device_id가 필요한 명령.
+
+reload는 플릿 전체, profile은 기기 또는 사이트 단위라 여기서 빠진다.
+"""
 
 DEFAULT_BURST_OVERRIDES: dict[str, float] = {
     "pm25": 120.0, "pm10": 180.0, "co2": 2200.0, "tvoc": 900.0,
@@ -54,6 +58,10 @@ class Command:
     minutes: float | None = None
     overrides: dict[str, float] | None = None
     """burst 전용. 없으면 러너가 시나리오·내장 기본값을 쓴다."""
+    site_id: str = ""
+    """profile 전용. 사이트 단위 일괄 적용 대상 (device_id 대신)."""
+    preset: str = ""
+    """profile 전용. 환경 등급 이름."""
 
 
 def parse_overrides(raw: Any, strict: bool = True) -> dict[str, float] | None:
@@ -108,11 +116,20 @@ def write_command(
     device_id: str = "",
     minutes: float | None = None,
     overrides: dict[str, float] | None = None,
+    site_id: str = "",
+    preset: str = "",
 ) -> Path:
     if command not in COMMANDS:
         raise ControlError(f"알 수 없는 명령 '{command}' (사용 가능: {COMMANDS})")
     if command in DEVICE_COMMANDS and not device_id:
         raise ControlError(f"'{command}' 명령에는 device_id가 필요합니다")
+    if command == PROFILE:
+        if not device_id and not site_id:
+            raise ControlError("profile 명령에는 device_id 또는 site_id가 필요합니다")
+        if preset not in PRESET_NAMES:
+            raise ControlError(
+                f"알 수 없는 환경 프리셋 '{preset}' (사용 가능: {', '.join(PRESET_NAMES)})"
+            )
     overrides = parse_overrides(overrides)
     directory = Path(control_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -127,6 +144,8 @@ def write_command(
             "device_id": device_id,
             "minutes": minutes,
             "overrides": overrides,
+            "site_id": site_id,
+            "preset": preset,
         },
     )
     return path
@@ -155,6 +174,8 @@ def drain_commands(control_dir: str | Path) -> list[Command]:
                     # 필드가 없는 예전 명령 파일도 그대로 읽힌다. 손으로 만든
                     # 파일의 잘못된 항목은 버리되 명령 자체는 살린다.
                     overrides=parse_overrides(raw.get("overrides"), strict=False),
+                    site_id=str(raw.get("site_id") or ""),
+                    preset=str(raw.get("preset") or ""),
                 )
             )
         except Exception as exc:

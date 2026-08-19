@@ -371,6 +371,58 @@ def test_shipped_example_inventory_loads():
     inventory = load_inventory(example)
 
     assert any(item.starts_powered_off for item in inventory)
+    assert any(item.profile == "bad" for item in inventory)
+
+
+# ---- 환경 프로파일 -----------------------------------------------------
+
+
+def with_profile(value: str) -> str:
+    return VALID_INVENTORY.replace(
+        "    facility_type: OFFICE",
+        f"    facility_type: OFFICE\n    profile: {value}",
+        1,
+    )
+
+
+def test_profile_defaults_to_none_not_good(tmp_path):
+    """None과 good을 구분해야 site_profiles 우선순위가 성립한다."""
+    inventory = load_inventory(write_inventory(tmp_path, VALID_INVENTORY))
+
+    assert inventory[0].profile is None
+
+
+def test_device_profile_is_parsed(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, with_profile("bad")))
+
+    assert inventory[0].profile == "bad"
+
+
+def test_rejects_unknown_device_profile(tmp_path):
+    with pytest.raises(InventoryError, match="profile"):
+        load_inventory(write_inventory(tmp_path, with_profile("awful")))
+
+
+def test_scenario_site_profiles(tmp_path):
+    body = "name: t\nsite_profiles:\n  site-a: bad\n  site-b: moderate\n"
+
+    scenario = load_scenario(write(tmp_path, body))
+
+    assert scenario.site_profiles == {"site-a": "bad", "site-b": "moderate"}
+
+
+def test_scenario_site_profiles_default_empty(tmp_path):
+    assert load_scenario(write(tmp_path, "name: t\n")).site_profiles == {}
+
+
+def test_scenario_rejects_unknown_site_preset(tmp_path):
+    with pytest.raises(ScenarioError, match="site_profiles"):
+        load_scenario(write(tmp_path, "name: t\nsite_profiles:\n  site-a: awful\n"))
+
+
+def test_scenario_rejects_non_mapping_site_profiles(tmp_path):
+    with pytest.raises(ScenarioError, match="site_profiles"):
+        load_scenario(write(tmp_path, "name: t\nsite_profiles: [a, b]\n"))
 
 
 def test_directory_at_inventory_path_explains_the_mount_mistake(tmp_path):

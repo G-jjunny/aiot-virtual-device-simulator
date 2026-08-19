@@ -33,6 +33,7 @@ from livesim.config import (
     load_inventory,
 )
 from livesim.device import LiveDevice, MqttPublisher, Publisher
+from livesim.profiles import DEFAULT_PROFILE
 from livesim.scheduler import EventScheduler
 
 LOG = logging.getLogger("livesim.runner")
@@ -106,6 +107,7 @@ class DeviceSession:
     backoff: float = 0.0
     disabled: bool = False
     disabled_reason: str = ""
+    profile: str = DEFAULT_PROFILE
 
 
 class Runner:
@@ -131,6 +133,8 @@ class Runner:
         self.sessions: dict[str, DeviceSession] = {}
         self.order: list[str] = []
         self.tick_index = 0
+        self.profile_overrides: dict[str, str] = {}
+        """런타임 환경 등급 변경. 메모리에만 있고 재시작하면 사라진다."""
 
     # ---- 준비 -----------------------------------------------------------
 
@@ -146,8 +150,30 @@ class Runner:
         }
         self.order = [item.device_id for item in selected]
         for item in selected:
+            self._sync_profile(self.sessions[item.device_id])
             self._apply_initial_power(item)
         return selected
+
+    def effective_profile(self, credential: DeviceCredential) -> str:
+        """환경 등급 3계층 우선순위.
+
+        런타임(ctl/패널) > devices.yaml 명시 > 시나리오 site_profiles > good.
+        런타임 변경은 메모리에만 있어 재시작하면 사라진다 — 파일이 진실이다.
+        """
+        return (
+            self.profile_overrides.get(credential.device_id)
+            or credential.profile
+            or self.scenario.site_profiles.get(credential.site_id)
+            or DEFAULT_PROFILE
+        )
+
+    def _sync_profile(self, session: DeviceSession) -> str:
+        """세션과 LiveDevice에 현재 유효 등급을 반영한다."""
+        preset = self.effective_profile(session.credential)
+        session.profile = preset
+        if session.device is not None:
+            session.device.profile = preset
+        return preset
 
     def _apply_initial_power(self, credential: DeviceCredential) -> None:
         """인벤토리의 power: off를 수동 전원차단과 같은 상태로 걸어둔다.
@@ -303,6 +329,9 @@ class Runner:
             # 플릿 전체 대상이라 device_id가 없다.
             self.reload_inventory()
             return
+        if command.command == control.PROFILE:
+            self._apply_profile(command)
+            return
 
         session = self.sessions.get(command.device_id)
         if session is None:
@@ -383,6 +412,7 @@ class Runner:
             session = self.sessions.get(device_id)
             if session is None:
                 self.sessions[device_id] = DeviceSession(credential)
+                self._sync_profile(self.sessions[device_id])
                 # 처음 등재되는 기기에만 파일의 초기 전원을 적용한다. 이미 돌고
                 # 있는 기기까지 적용하면 리로드가 사람이 켜둔 기기를 다시 끈다.
                 self._apply_initial_power(credential)
@@ -394,6 +424,8 @@ class Runner:
             session.credential = credential
             if session.device is not None:
                 session.device.credential = credential
+            # 파일의 profile이 바뀌었을 수 있다. 런타임 변경이 있으면 그쪽이 이긴다.
+            self._sync_profile(session)
             if session.disabled:
                 # 거부됐던 디바이스는 새 시크릿으로 다시 시도할 기회를 준다.
                 session.disabled = False
@@ -410,6 +442,26 @@ class Runner:
         return ReloadResult(
             ok=True, added=tuple(added), removed=tuple(removed), rotated=tuple(rotated)
         )
+
+    def _apply_profile(self, command: control.Command) -> None:
+        """환경 등급을 기기 또는 사이트 단위로 즉시 바꾼다 (기간 없음)."""
+        if command.site_id:
+            targets = [
+                device_id for device_id in self.order
+                if self.sessions[device_id].credential.site_id == command.site_id
+            ]
+            scope = f"사이트 {command.site_id}"
+        else:
+            targets = [command.device_id] if command.device_id in self.sessions else []
+            scope = command.device_id
+
+        if not targets:
+            LOG.warning("프로파일 대상 없음: %s", scope)
+            return
+        for device_id in targets:
+            self.profile_overrides[device_id] = command.preset
+            self._sync_profile(self.sessions[device_id])
+        LOG.info("[ctl] 환경 등급 %s → %s (%d대)", scope, command.preset, len(targets))
 
     def _burst_overrides(self) -> dict[str, float]:
         """시나리오의 alert_burst 목표값을 재사용하고, 없으면 내장 기본값."""
@@ -432,6 +484,8 @@ class Runner:
                 # 패널이 인벤토리와 조인하지 않고 상태만으로 유형별 필터를
                 # 그릴 수 있게 한다 (두 응답의 타이밍이 어긋나면 조인이 샌다).
                 "device_type": session.credential.device_type,
+                "site_id": session.credential.site_id,
+                "profile": session.profile,
                 "connected": session.connected,
                 "online": session.device.online if session.device else False,
                 "pending": session.device.pending if session.device else 0,
@@ -494,7 +548,9 @@ class Runner:
             return self._schedule_retry(session, now, exc)
 
         if session.device is None:
-            session.device = LiveDevice(session.credential, publisher)
+            session.device = LiveDevice(
+                session.credential, publisher, profile=session.profile
+            )
         else:
             session.device.publisher = publisher
         session.connected = True

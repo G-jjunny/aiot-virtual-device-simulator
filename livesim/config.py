@@ -17,7 +17,7 @@ from typing import Any
 
 import yaml
 
-from livesim.profiles import DEVICE_FIELDS, SENSOR_PROFILES
+from livesim.profiles import DEVICE_FIELDS, PRESET_NAMES, SENSOR_PROFILES
 
 
 class ConfigError(ValueError):
@@ -62,7 +62,7 @@ FACILITY_TYPES = (
 
 _SCENARIO_KEYS = {
     "name", "description", "interval_seconds", "max_devices",
-    "exclude_devices", "events",
+    "exclude_devices", "events", "site_profiles",
 }
 _EVENT_KEYS = {"type", "per_device_per_day", "duration_minutes", "overrides"}
 
@@ -103,6 +103,8 @@ class Scenario:
     max_devices: int
     exclude_devices: tuple[str, ...]
     events: tuple[EventSpec, ...]
+    site_profiles: dict[str, str] = field(default_factory=dict)
+    """site_id → 환경 프리셋. 그 사이트의 기기 전체에 적용된다 (기기 명시가 우선)."""
 
 
 def _positive_number(where: str, value: Any) -> float:
@@ -231,6 +233,20 @@ def load_scenario(path: str | Path) -> Scenario:
         # 뒤쪽 정의는 앞쪽에 가려 사실상 무시된다.
         raise ScenarioError("events: 같은 type이 중복되었습니다")
 
+    site_profiles_raw = raw.get("site_profiles") or {}
+    if not isinstance(site_profiles_raw, dict):
+        raise ScenarioError("site_profiles는 {site_id: 프리셋} 매핑이어야 합니다")
+    site_profiles: dict[str, str] = {}
+    for site_id, preset in site_profiles_raw.items():
+        if not isinstance(site_id, str) or not site_id.strip():
+            raise ScenarioError(
+                f"site_profiles: site_id는 비어 있지 않은 문자열이어야 합니다 "
+                f"(받은 값: {site_id!r})"
+            )
+        site_profiles[site_id.strip()] = validate_preset(
+            f"site_profiles[{site_id}]", preset, ScenarioError
+        )
+
     return Scenario(
         name=name,
         description=str(raw.get("description", "")),
@@ -238,6 +254,7 @@ def load_scenario(path: str | Path) -> Scenario:
         max_devices=max_devices,
         exclude_devices=tuple(excluded),
         events=tuple(events),
+        site_profiles=site_profiles,
     )
 
 
@@ -254,6 +271,12 @@ class DeviceCredential:
     site_id: str
     device_type: str
     facility_type: str
+    profile: str | None = None
+    """이 기기의 환경 등급. None이면 시나리오 site_profiles → good 순으로 내려간다.
+
+    None과 "good"을 구분해야 한다 — 명시한 good은 사이트 지정을 이기지만,
+    미지정은 사이트 지정을 따라야 하기 때문이다.
+    """
     power: str = POWER_ON
     """**초기** 전원 상태. 러너가 이 기기를 처음 등재할 때만 적용된다.
 
@@ -269,7 +292,15 @@ class DeviceCredential:
 
 _INVENTORY_KEYS = {
     "device_id", "secret", "site_id", "device_type", "facility_type", "power",
+    "profile",
 }
+
+
+def validate_preset(where: str, value: Any, error: type[ConfigError]) -> str:
+    """환경 프리셋 이름 검증. 인벤토리·시나리오·제어 명령이 함께 쓴다."""
+    if not isinstance(value, str) or value not in PRESET_NAMES:
+        raise error(f"{where}: {PRESET_NAMES} 중 하나여야 합니다 (받은 값: {value!r})")
+    return value
 
 
 def _inventory_text(where: str, entry: dict[str, Any], key: str) -> str:
@@ -368,12 +399,17 @@ def parse_credential(where: str, entry: Any) -> DeviceCredential:
             f"{where}.power: {POWER_STATES} 중 하나여야 합니다 (받은 값: {power!r})"
         )
 
+    profile = entry.get("profile")
+    if profile is not None:
+        profile = validate_preset(f"{where}.profile", profile, InventoryError)
+
     return DeviceCredential(
         device_id=_inventory_text(where, entry, "device_id"),
         secret=_inventory_text(where, entry, "secret"),
         site_id=_inventory_text(where, entry, "site_id"),
         device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
         facility_type=_inventory_enum(where, entry, "facility_type", FACILITY_TYPES),
+        profile=profile,
         power=power.strip().lower(),
     )
 

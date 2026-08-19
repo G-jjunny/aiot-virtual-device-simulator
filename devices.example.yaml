@@ -45,3 +45,17 @@ devices:
     device_type: FIXED
     facility_type: OFFICE
     power: off
+
+  # profile: 이 기기가 놓인 **상시** 환경 등급
+  # (good | moderate | bad | very_bad, 생략 시 good).
+  # 버스트(일시 이벤트)와 달리 기간이 없습니다 — "이 기기는 원래 공기가 나쁜
+  # 곳에 있다"를 뜻합니다.
+  #
+  # 우선순위: 런타임(ctl/패널) > 여기 > 시나리오 site_profiles > good.
+  # 명시한 good은 시나리오의 사이트 지정을 이깁니다 (생략과 다릅니다).
+  - device_id: AQ-YEONGDEUNGPO-01
+    secret: "여기에-발급받은-시크릿"
+    site_id: "660e8400-e29b-41d4-a716-446655441111"
+    device_type: FIXED
+    facility_type: SCHOOL
+    profile: bad
