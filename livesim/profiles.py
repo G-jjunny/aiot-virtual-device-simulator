@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 
@@ -77,8 +77,76 @@ def _unit_noise(name: str, ts: datetime, seed: int) -> float:
     return raw * 2.0 - 1.0
 
 
-def sensor_value(name: str, ts: datetime, seed: int = 0) -> float:
+GOOD = "good"
+MODERATE = "moderate"
+BAD = "bad"
+VERY_BAD = "very_bad"
+DEFAULT_PROFILE = GOOD
+
+# 환경 프리셋 — 기기가 놓인 **상시** 환경 등급. 버스트(일시 이벤트)와 달리
+# 기간이 없다.
+#
+# 차등 테이블이다: {지표: (base, amplitude)}만 갈아끼우고 noise·peak_hour·
+# min/max·decimals는 good의 것을 그대로 물려받는다. 물리 클램프를 건드리지
+# 않아야 업로드 DTO 검증(422)이 그대로 통과한다.
+#
+# good은 비어 있다 = SENSOR_PROFILES 원본. 기존 동작을 바꾸지 않기 위해서다.
+ENVIRONMENT_PRESETS: dict[str, dict[str, tuple[float, float]]] = {
+    GOOD: {},
+    MODERATE: {
+        # 등급 경계를 걸치게 둔다 — 시간대에 따라 '좋음'과 '나쁨' 사이를 오간다.
+        "pm25": (40.0, 12.0),
+        "pm10": (70.0, 20.0),
+        "co2": (1100.0, 250.0),
+        "tvoc": (350.0, 120.0),
+        "hcho": (0.08, 0.03),
+    },
+    BAD: {
+        "pm25": (65.0, 15.0),
+        "pm10": (110.0, 25.0),
+        "co2": (1600.0, 300.0),
+        "tvoc": (700.0, 200.0),
+        "hcho": (0.13, 0.04),
+        "co": (1.5, 0.5),
+        "radon": (3.5, 1.0),
+        # 생체는 미세하게만 — 오염 환경의 생리 반응이지 질병이 아니다.
+        "heart_rate": (82.0, 12.0),
+        "spo2": (96.0, 1.0),
+    },
+    VERY_BAD: {
+        "pm25": (100.0, 25.0),
+        "pm10": (170.0, 35.0),
+        "co2": (2500.0, 500.0),
+        "tvoc": (1200.0, 300.0),
+        "hcho": (0.2, 0.06),
+        "co": (3.0, 1.0),
+        "radon": (5.0, 1.5),
+        "no2": (0.08, 0.03),
+        "o3": (0.07, 0.03),
+        "h2s": (0.03, 0.01),
+        "nh3": (0.04, 0.015),
+        "heart_rate": (86.0, 12.0),
+        "spo2": (95.0, 1.0),
+    },
+}
+
+PRESET_NAMES = tuple(ENVIRONMENT_PRESETS)
+
+
+def profile_for(name: str, preset: str = DEFAULT_PROFILE) -> Profile:
+    """프리셋이 지정한 base/amplitude만 갈아끼운 Profile."""
     profile = SENSOR_PROFILES[name]
+    override = ENVIRONMENT_PRESETS.get(preset, {}).get(name)
+    if override is None:
+        return profile
+    base, amplitude = override
+    return replace(profile, base=base, amplitude=amplitude)
+
+
+def sensor_value(
+    name: str, ts: datetime, seed: int = 0, preset: str = DEFAULT_PROFILE
+) -> float:
+    profile = profile_for(name, preset)
     hours = ts.hour + ts.minute / 60.0
     phase = 2.0 * math.pi * (hours - profile.peak_hour) / 24.0
     value = profile.base + profile.amplitude * math.cos(phase)
@@ -87,6 +155,8 @@ def sensor_value(name: str, ts: datetime, seed: int = 0) -> float:
     return round(value, profile.decimals)
 
 
-def reading(device_type: str, ts: datetime, seed: int = 0) -> dict[str, float]:
+def reading(
+    device_type: str, ts: datetime, seed: int = 0, preset: str = DEFAULT_PROFILE
+) -> dict[str, float]:
     fields = DEVICE_FIELDS.get(device_type, AIR_QUALITY_FIELDS)
-    return {name: sensor_value(name, ts, seed) for name in fields}
+    return {name: sensor_value(name, ts, seed, preset) for name in fields}

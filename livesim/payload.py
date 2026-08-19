@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from livesim.profiles import SENSOR_PROFILES, reading
+from livesim.profiles import DEFAULT_PROFILE, SENSOR_PROFILES, reading
 
 REQUIRED_FIELDS = ("device_id", "site_id", "device_type", "captured_at")
 
@@ -36,6 +36,7 @@ def build_payload(
     facility_type: str | None = None,
     seed: int = 0,
     captured_at_offset: str = KST_OFFSET,
+    preset: str = DEFAULT_PROFILE,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "device_id": device_id,
@@ -50,7 +51,7 @@ def build_payload(
     }
     if facility_type:
         payload["facility_type"] = facility_type
-    payload.update(reading(device_type, ts, seed))
+    payload.update(reading(device_type, ts, seed, preset))
     return payload
 
 
