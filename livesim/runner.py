@@ -435,6 +435,8 @@ class Runner:
             rotated.append(device_id)
 
         self.order = sorted(self.sessions)
+        for device_id in added:
+            self._connect_new_device(device_id)
         LOG.info(
             "인벤토리 리로드: 추가 %d, 제거 %d, 자격증명 변경 %d (총 %d대)",
             len(added), len(removed), len(rotated), len(self.order),
@@ -442,6 +444,21 @@ class Runner:
         return ReloadResult(
             ok=True, added=tuple(added), removed=tuple(removed), rotated=tuple(rotated)
         )
+
+    def _connect_new_device(self, device_id: str) -> None:
+        """새로 등재된 기기는 다음 틱을 기다리지 않고 바로 붙여 본다.
+
+        발행은 다음 틱 그대로다. 접속만 앞당기는 이유: 주입 직후 최대 한 틱(기본
+        5분) 동안 '미접속' 카드로 남아 꺼진 기기처럼 보였기 때문이다.
+
+        실패해도 _ensure_connected가 기존 백오프로 처리하므로 새 실패 경로는 없다.
+        같은 호출이 원래 틱에서 일어날 일을 앞당기는 것뿐이라 총 작업량도 같다.
+        """
+        session = self.sessions[device_id]
+        described = self.scheduler.describe(device_id)
+        if described and described[0] == POWER_OFF:
+            return   # 꺼진 채로 등재한 기기는 붙이지 않는다
+        self._ensure_connected(session, self.clock())
 
     def _apply_profile(self, command: control.Command) -> None:
         """환경 등급을 기기 또는 사이트 단위로 즉시 바꾼다 (기간 없음)."""

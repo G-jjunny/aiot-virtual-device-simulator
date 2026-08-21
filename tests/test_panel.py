@@ -351,6 +351,45 @@ def test_countdown_skips_the_editing_card(panel):
     assert "dataset.did===keep" in body
 
 
+# ---- 상태 3분류 표시 ----------------------------------------------------
+
+
+def test_pending_connect_is_distinct_from_power_off(panel):
+    """주입 직후 '접속 대기'가 전원 off처럼 보여 꺼진 줄 알았다는 제보."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    assert "function isPendingConnect" in body
+    assert "접속 대기(다음 틱)" in body
+    assert ".card.wait" in body       # 전용 스타일 (하늘색 점선)
+    assert ".badge.wait" in body
+
+
+def test_three_status_classes_are_ordered(panel):
+    """disabled → power_off → 접속 대기 순으로 판정해야 서로 겹치지 않는다."""
+    body = requests.get(panel[0] + "/", timeout=5).text
+
+    order = [
+        body.index("if(d.disabled) return 'bad';"),
+        body.index("if(d.event==='power_off') return 'offp';"),
+        body.index("if(isPendingConnect(d)) return 'wait';"),
+    ]
+    assert order == sorted(order)
+
+
+def test_pending_connect_requires_no_event_and_not_disabled(panel):
+    """이벤트가 있거나 비활성이면 '대기'가 아니다."""
+    body = requests.get(panel[0] + "/", timeout=5).text
+
+    assert "!d.disabled && !d.connected && !d.event" in body
+
+
+def test_inject_message_explains_the_wait(panel):
+    body = requests.get(panel[0] + "/", timeout=5).text
+
+    assert "다음 틱(최대 발행주기)에 접속합니다" in body
+
+
 # ---- 포커스 가드 (리렌더 진입점 일반화) ---------------------------------
 
 
@@ -394,6 +433,30 @@ def test_toolbar_units_go_through_the_guard(panel):
 
     assert "paintUnit($('#tabs')" in body
     assert "paintUnit($('#sitebar')" in body
+
+
+def test_guard_ignores_buttons(panel):
+    """버튼은 클릭 후에도 포커스를 유지한다.
+
+    버튼까지 가드에 세면 [전원 on]을 한 번 누른 카드가 영원히 스킵되고
+    '갱신 일시정지' 배지가 붙박이가 된다 — 실제로 그랬다.
+    """
+    body = requests.get(panel[0] + "/", timeout=5).text
+
+    assert "function isEditingControl" in body
+    assert "isEditingControl(active)" in body
+    assert "'button','submit','reset','checkbox','radio'" in body
+
+
+def test_action_buttons_release_focus(panel):
+    """가드가 입력류만 보긴 하지만, 남은 포커스 링도 편집 중처럼 보인다."""
+    body = requests.get(panel[0] + "/", timeout=5).text
+
+    assert "function releaseButton" in body
+    for caller in ("async function cmd", "async function bulkProfile",
+                   "function toggleForm"):
+        start = body.index(caller)
+        assert "releaseButton()" in body[start:start + 400], caller
 
 
 def test_pause_notice_is_debounced(panel):

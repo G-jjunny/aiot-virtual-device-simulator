@@ -366,6 +366,9 @@ border-radius:8px;padding:12px}
 .card.offp{border-left-color:var(--off)}
 .card.drop{border-left-color:var(--warn)}
 .card.bad{border-left-color:var(--bad)}
+/* 접속 대기: 꺼진 것(회색 실선)과 구분되게 하늘색 점선 */
+.card.wait{border-left-color:#4aa3d8;border-left-style:dashed}
+.badge.wait{background:#122a3a;color:#7fc3e8}
 .did{font-weight:650;font-size:14px;word-break:break-all}
 .meta{color:var(--dim);font-size:12px;margin:4px 0 8px}
 .badge{display:inline-block;font-size:11px;padding:2px 7px;border-radius:99px;
@@ -494,7 +497,20 @@ function selectType(t){
 
 function holdsFocus(node){
   const active=document.activeElement;
-  return !!(node && active && active!==document.body && node.contains(active));
+  return !!(node && active && active!==document.body && node.contains(active)
+            && isEditingControl(active));
+}
+
+// 가드는 "사용자가 실제로 편집 중인 컨트롤"에만 걸린다.
+//
+// 버튼은 클릭 후에도 포커스를 유지한다. 버튼까지 세면 [전원 on]을 한 번 누른
+// 카드가 영원히 스킵되고 '갱신 일시정지' 배지가 붙박이가 된다 — 실제로 그랬다.
+// 값을 담고 있어 다시 그리면 잃어버리는 것(입력·셀렉트)만 보호 대상이다.
+function isEditingControl(el){
+  const tag=(el.tagName||'').toLowerCase();
+  if(tag==='select' || tag==='textarea') return true;
+  if(tag!=='input') return false;
+  return !['button','submit','reset','checkbox','radio'].includes(el.type);
 }
 
 /** 단위 하나를 서명 기반으로 갱신한다. 실제로 다시 그렸으면 true. */
@@ -558,6 +574,7 @@ function renderSiteBar(devs,force){
 async function bulkProfile(){
   const preset=$('#bulkpreset')?.value;
   if(!preset || activeSite===SITE_ALL) return;
+  releaseButton();
   try{
     await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({type:'profile',site_id:activeSite,preset})});
@@ -574,9 +591,18 @@ function envBadge(d){
   return '<span class="badge env '+esc(p)+'">'+esc(p)+'</span>';
 }
 
+// "아직 안 붙었을 뿐"과 "꺼졌다"는 다르다.
+//
+// 리로드·주입으로 갓 등재된 기기는 다음 틱에 접속한다. 이걸 전원 off와 같은
+// 회색으로 그리면 방금 주입한 기기가 꺼진 것처럼 보인다 — 실제로 오해가 났다.
+function isPendingConnect(d){
+  return !d.disabled && !d.connected && !d.event;
+}
+
 function cls(d){
   if(d.disabled) return 'bad';
   if(d.event==='power_off') return 'offp';
+  if(isPendingConnect(d)) return 'wait';
   if(d.event==='dropout'||!d.online) return 'drop';
   return d.connected?'on':'offp';
 }
@@ -617,6 +643,7 @@ function badges(d){
   if(d.disabled) h+='<span class="badge r">비활성</span>';
   else if(d.event) h+='<span class="badge w">'+esc(d.event)+
     (d.event_manual?' 수동':'')+'</span>';
+  else if(isPendingConnect(d)) h+='<span class="badge wait">접속 대기(다음 틱)</span>';
   else if(d.connected&&d.online) h+='<span class="badge g">정상</span>';
   if(d.pending>0) h+='<span class="badge">버퍼 '+d.pending+'</span>';
   if(d.event_ends_at!=null)
@@ -627,7 +654,15 @@ function badges(d){
   return h;
 }
 
+// 동작 버튼은 누르고 나면 포커스를 놓는다. 가드가 입력류만 보긴 하지만,
+// 남아 있는 포커스 링이 "아직 뭔가 편집 중"처럼 보이는 것도 피한다.
+function releaseButton(){
+  const active=document.activeElement;
+  if(active && !isEditingControl(active) && active.blur) active.blur();
+}
+
 async function cmd(type,device_id,minutes,overrides,preset){
+  releaseButton();
   try{
     await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({type,device_id,minutes,overrides,preset})});
@@ -648,6 +683,7 @@ let draft={};               // device_id -> {minutes, overrides:{name:value}}
 
 function formKey(id,kind){return id+'|'+kind}
 function toggleForm(id,kind){
+  releaseButton();
   const key=formKey(id,kind);
   openForm = openForm===key ? null : key;
   if(!draft[id]) draft[id]={};
@@ -897,7 +933,8 @@ $('#inject').onclick=async()=>{
         site_id:$('#f_site').value,device_type:$('#f_dt').value,
         facility_type:$('#f_ft').value,
         power:$('#f_off').checked?'off':'on'})});
-    say('주입 완료: '+r.device_id+' — 러너 리로드 요청됨',false);
+    say('주입 완료: '+r.device_id+' — 러너 리로드 요청됨. '+
+        '다음 틱(최대 발행주기)에 접속합니다.',false);
     $('#f_id').value='';$('#f_sec').value='';$('#f_site').value='';
     setTimeout(refresh,800);
   }catch(e){say(e.message,true)}

@@ -302,6 +302,45 @@ def test_reload_does_not_re_power_off_a_running_device(tmp_path):
     assert runner.scheduler.describe("AQ-1") is None
 
 
+def test_reload_connects_new_devices_immediately(tmp_path):
+    """주입 직후 한 틱(기본 5분)을 '미접속'으로 기다리면 꺼진 것처럼 보인다."""
+    runner, connector, path = power_runner(tmp_path, entry("AQ-1"))
+    runner.tick(TS, now=0.0)
+    assert connector.calls == ["AQ-1"]
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry("AQ-2"), encoding="utf-8")
+    runner.reload_inventory()
+
+    # 틱을 돌리지 않았는데도 이미 붙어 있어야 한다
+    assert "AQ-2" in connector.calls
+    assert runner.sessions["AQ-2"].connected is True
+
+
+def test_reload_does_not_connect_a_power_off_device(tmp_path):
+    """꺼진 채로 등재한 기기는 즉시 접속 대상이 아니다."""
+    runner, connector, path = power_runner(tmp_path, entry("AQ-1"))
+    runner.tick(TS, now=0.0)
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry_off("AQ-2"), encoding="utf-8")
+    runner.reload_inventory()
+
+    assert "AQ-2" not in connector.calls
+    assert runner.sessions["AQ-2"].connected is False
+
+
+def test_eager_connect_failure_falls_back_to_backoff(tmp_path):
+    """즉시 접속이 실패해도 새 실패 경로를 만들지 않는다 — 기존 백오프 그대로."""
+    connector = FakeConnector(connect_failures=99)
+    runner, _, path = power_runner(tmp_path, entry("AQ-1"), connector=connector)
+
+    path.write_text("devices:\n" + entry("AQ-1") + entry("AQ-2"), encoding="utf-8")
+    result = runner.reload_inventory()
+
+    assert result.ok is True                         # 리로드 자체는 성공
+    assert runner.sessions["AQ-2"].connected is False
+    assert runner.sessions["AQ-2"].next_attempt > 0  # 백오프 예약됨
+
+
 def test_reload_adds_new_devices(tmp_path):
     runner, _, path = reload_runner(tmp_path)
 
