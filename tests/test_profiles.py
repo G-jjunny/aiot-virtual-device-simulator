@@ -4,7 +4,10 @@ import pytest
 
 from livesim.profiles import (
     ENVIRONMENT_PRESETS,
+    FACILITY_GRADE_BANDS,
+    FACILITY_PRESETS,
     PRESET_NAMES,
+    SCHOOL_HUMI_BAND,
     SENSOR_PROFILES,
     profile_for,
     reading,
@@ -155,3 +158,241 @@ def test_unknown_preset_falls_back_to_good():
 def test_unknown_sensor_name_raises():
     with pytest.raises(KeyError):
         sensor_value("nope", TS)
+
+
+# ---- 시설별 밴드 보정 --------------------------------------------------------
+
+GOOD_G, MODERATE_G, BAD_G = "좋음", "보통", "나쁨"
+
+
+def _grade(facility: str, name: str, value: float) -> str:
+    """FACILITY_GRADE_BANDS 스냅샷으로 등급을 매긴다 (상한 포함)."""
+    good_max, moderate_max = FACILITY_GRADE_BANDS[facility][name]
+    if value <= good_max:
+        return GOOD_G
+    if moderate_max is None or value > moderate_max:
+        return BAD_G
+    return MODERATE_G
+
+
+def _worst_case(name: str, preset: str, facility: str) -> tuple[float, float]:
+    """노이즈·클램프·반올림까지 최악으로 밀어붙인 값 범위.
+
+    sensor_value가 만들 수 있는 값은 반드시 이 안에 들어온다.
+    """
+    p = profile_for(name, preset, facility)
+    lo = max(p.minimum, p.base - p.amplitude - p.noise)
+    hi = min(p.maximum, p.base + p.amplitude + p.noise)
+    rounding = 0.5 * 10 ** -p.decimals
+    return lo - rounding, hi + rounding
+
+
+def _waveform(name: str, preset: str, facility: str) -> tuple[float, float]:
+    """노이즈를 뺀 일주기 파형의 범위."""
+    p = profile_for(name, preset, facility)
+    return max(p.minimum, p.base - p.amplitude), min(p.maximum, p.base + p.amplitude)
+
+
+# 시설 × 프리셋 × 지표 → **최악 케이스에도** 유지되어야 하는 등급.
+# moderate는 밴드 폭보다 노이즈가 큰 지표가 있어 파형 기준으로 따로 검증한다.
+_STRICT_GUARANTEE = {
+    "good": {
+        "pm25": GOOD_G, "pm10": GOOD_G, "co2": GOOD_G, "tvoc": GOOD_G,
+        "hcho": GOOD_G, "no2": GOOD_G, "radon": GOOD_G, "co": GOOD_G,
+    },
+    "bad": {
+        "pm25": BAD_G, "pm10": BAD_G, "co2": BAD_G, "tvoc": BAD_G,
+        "hcho": BAD_G, "radon": BAD_G,
+        # 일반표가 건드리지 않는 지표는 좋음에 머문다 — 종합 등급은 최악
+        # 지표로 갈리므로 '나쁨' 판정에는 이걸로 충분하다.
+        "no2": GOOD_G, "co": GOOD_G,
+    },
+    "very_bad": {
+        "pm25": BAD_G, "pm10": BAD_G, "co2": BAD_G, "tvoc": BAD_G,
+        "hcho": BAD_G, "radon": BAD_G, "no2": BAD_G, "co": GOOD_G,
+    },
+}
+
+GUARANTEES: dict[str, dict[str, dict[str, str]]] = {
+    "DAYCARE": _STRICT_GUARANTEE,
+    "WELFARE": _STRICT_GUARANTEE,
+    "SCHOOL": {
+        "good": {**_STRICT_GUARANTEE["good"], "noise": GOOD_G, "o3": GOOD_G},
+        "bad": {**_STRICT_GUARANTEE["bad"], "noise": BAD_G, "o3": GOOD_G},
+        "very_bad": {**_STRICT_GUARANTEE["very_bad"], "noise": BAD_G, "o3": BAD_G},
+    },
+    "OFFICE": {
+        "good": {"pm10": GOOD_G, "co": GOOD_G},
+        "bad": {"pm10": BAD_G, "co": GOOD_G},
+        "very_bad": {"pm10": BAD_G, "co": GOOD_G},
+    },
+    "HOME": {
+        "good": {"hcho": GOOD_G, "radon": GOOD_G, "co": GOOD_G},
+        "bad": {"hcho": BAD_G, "radon": BAD_G, "co": GOOD_G},
+        "very_bad": {"hcho": BAD_G, "radon": BAD_G, "co": GOOD_G},
+    },
+}
+
+# moderate — 파형(base±amplitude) 기준. 노이즈에 의한 경계 걸침은 설계상 허용.
+MODERATE_WAVEFORM: dict[str, dict[str, str]] = {
+    "DAYCARE": {
+        "pm25": MODERATE_G, "pm10": MODERATE_G, "co2": MODERATE_G,
+        "tvoc": MODERATE_G, "hcho": MODERATE_G,
+        "no2": GOOD_G, "radon": GOOD_G, "co": GOOD_G,
+    },
+    "WELFARE": {
+        "pm25": MODERATE_G, "pm10": MODERATE_G, "co2": MODERATE_G,
+        "tvoc": MODERATE_G, "hcho": MODERATE_G,
+        "no2": GOOD_G, "radon": GOOD_G, "co": GOOD_G,
+    },
+    "SCHOOL": {
+        "pm25": MODERATE_G, "pm10": MODERATE_G, "co2": MODERATE_G,
+        "tvoc": MODERATE_G, "hcho": MODERATE_G,
+        "no2": GOOD_G, "radon": GOOD_G, "co": GOOD_G,
+        "noise": GOOD_G, "o3": GOOD_G,
+    },
+    "OFFICE": {"pm10": MODERATE_G, "co": GOOD_G},
+    # 가정 hcho는 2단계(적합/부적합)라 '보통'이 없다 — moderate는 적합에 머문다.
+    "HOME": {"hcho": GOOD_G, "radon": GOOD_G, "co": GOOD_G},
+}
+
+
+def _guarantee_cases() -> list[tuple[str, str, str, str]]:
+    return [
+        (facility, preset, metric, expected)
+        for facility, presets in GUARANTEES.items()
+        for preset, metrics in presets.items()
+        for metric, expected in metrics.items()
+    ]
+
+
+@pytest.mark.parametrize(
+    ("facility", "preset", "metric", "expected"),
+    _guarantee_cases(),
+    ids=lambda v: str(v),
+)
+def test_preset_holds_its_grade_in_the_worst_case(facility, preset, metric, expected):
+    """±진폭 + 노이즈 + 반올림 최악값에도 목표 등급 구간을 벗어나지 않는다."""
+    low, high = _worst_case(metric, preset, facility)
+    assert _grade(facility, metric, low) == expected, f"하한 {low}"
+    assert _grade(facility, metric, high) == expected, f"상한 {high}"
+
+
+@pytest.mark.parametrize(
+    ("facility", "metric", "expected"),
+    [
+        (facility, metric, expected)
+        for facility, metrics in MODERATE_WAVEFORM.items()
+        for metric, expected in metrics.items()
+    ],
+    ids=lambda v: str(v),
+)
+def test_moderate_waveform_sits_in_its_band(facility, metric, expected):
+    low, high = _waveform(metric, "moderate", facility)
+    assert _grade(facility, metric, low) == expected, f"하한 {low}"
+    assert _grade(facility, metric, high) == expected, f"상한 {high}"
+
+
+@pytest.mark.parametrize(
+    ("facility", "preset", "metric", "expected"),
+    _guarantee_cases(),
+    ids=lambda v: str(v),
+)
+def test_sampled_values_match_the_guaranteed_grade(
+    facility, preset, metric, expected
+):
+    """산식만 믿지 않는다 — 24시간 × 여러 시드 실측값의 등급도 같아야 한다."""
+    for hour in range(24):
+        for minute in (0, 30):
+            for seed in range(5):
+                ts = TS.replace(hour=hour, minute=minute)
+                value = sensor_value(metric, ts, seed, preset, facility)
+                assert _grade(facility, metric, value) == expected, (
+                    f"{facility}/{preset}/{metric} {hour:02d}:{minute:02d} "
+                    f"seed={seed} → {value}"
+                )
+
+
+def test_school_humidity_follows_its_two_sided_band():
+    """학교 습도는 양방향 밴드 — 낮아도 높아도 나쁨이다."""
+    good_low, good_high, _, bad_over = SCHOOL_HUMI_BAND
+
+    low, high = _worst_case("humi", "good", "SCHOOL")
+    assert good_low <= low and high <= good_high
+
+    wave_low, wave_high = _waveform("humi", "moderate", "SCHOOL")
+    assert good_high < wave_low and wave_high <= bad_over
+
+    for preset in ("bad", "very_bad"):
+        low, _ = _worst_case("humi", preset, "SCHOOL")
+        assert low > bad_over, f"{preset} 하한 {low}"
+
+
+def test_co_can_never_reach_bad_by_physics():
+    """co는 물리 상한(10ppm)이 '나쁨' 경계와 같아 어떤 프리셋도 넘길 수 없다.
+
+    결함이 아니라 측정기 사양이다. 문서(README §4-B)에도 같은 이유를 적어둔다.
+    """
+    moderate_max = FACILITY_GRADE_BANDS["DAYCARE"]["co"][1]
+    assert SENSOR_PROFILES["co"].maximum <= moderate_max
+
+
+@pytest.mark.parametrize("facility", sorted(FACILITY_PRESETS))
+@pytest.mark.parametrize("preset", PRESET_NAMES)
+def test_facility_presets_stay_inside_physical_bounds(facility, preset):
+    """시설 보정도 클램프에 눌리지 않아야 한다 (업로드 422·파형 왜곡 방지)."""
+    for name in SENSOR_PROFILES:
+        p = profile_for(name, preset, facility)
+        assert p.base - p.amplitude - p.noise >= p.minimum, f"{facility}/{preset}/{name}"
+        assert p.base + p.amplitude + p.noise <= p.maximum, f"{facility}/{preset}/{name}"
+
+
+def test_facility_correction_wins_over_the_general_table():
+    general = profile_for("tvoc", "good")
+    daycare = profile_for("tvoc", "good", "DAYCARE")
+    assert (general.base, general.amplitude) == (150.0, 80.0)   # 일반표 그대로
+    assert daycare.base < general.base
+
+
+def test_metric_without_a_band_keeps_the_general_value():
+    """사무실은 pm25 밴드가 없다 — 일반 기준 값을 그대로 써야 한다."""
+    for preset in PRESET_NAMES:
+        for metric in ("pm25", "co2", "tvoc"):
+            assert profile_for(metric, preset, "OFFICE") == profile_for(metric, preset)
+
+
+def test_facility_without_bands_falls_back_to_the_general_table():
+    """HOME_ELDERLY는 백엔드 시드에 밴드가 없다. 오타·미지원도 같은 경로."""
+    for facility in ("HOME_ELDERLY", "NOPE"):
+        for preset in PRESET_NAMES:
+            for metric in ("pm25", "tvoc", "hcho"):
+                assert profile_for(metric, preset, facility) == profile_for(
+                    metric, preset
+                )
+
+
+def test_facility_lookup_is_case_insensitive():
+    assert profile_for("tvoc", "good", "daycare") == profile_for(
+        "tvoc", "good", "DAYCARE"
+    )
+
+
+def test_school_inherits_strict_corrections_and_adds_its_own():
+    assert profile_for("pm25", "good", "SCHOOL") == profile_for(
+        "pm25", "good", "DAYCARE"
+    )
+    school_noise = profile_for("noise", "good", "SCHOOL")
+    assert school_noise != SENSOR_PROFILES["noise"]
+    # 소음 밴드는 학교에만 있다 — 어린이집은 일반 파형 그대로.
+    assert profile_for("noise", "good", "DAYCARE") is SENSOR_PROFILES["noise"]
+
+
+def test_reading_passes_the_facility_through():
+    daycare = reading("FIXED", TS, seed=5, preset="good", facility_type="DAYCARE")
+    office = reading("FIXED", TS, seed=5, preset="good", facility_type="OFFICE")
+    assert daycare["tvoc"] < office["tvoc"]
+    assert daycare["pm10"] == office["pm10"]   # 둘 다 일반값(각자 밴드 안)
+
+
+def test_unknown_preset_with_facility_still_falls_back_to_good():
+    assert profile_for("pm25", "nope", "DAYCARE") is SENSOR_PROFILES["pm25"]

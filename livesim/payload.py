@@ -51,7 +51,9 @@ def build_payload(
     }
     if facility_type:
         payload["facility_type"] = facility_type
-    payload.update(reading(device_type, ts, seed, preset))
+    # facility_type은 페이로드 필드일 뿐 아니라 파형 기준이기도 하다 — 프리셋은
+    # 그 시설의 법정 밴드 기준 등급이므로 시설을 모르면 등급을 맞출 수 없다.
+    payload.update(reading(device_type, ts, seed, preset, facility_type))
     return payload
 
 

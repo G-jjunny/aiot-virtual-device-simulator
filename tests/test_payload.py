@@ -41,6 +41,15 @@ def test_captured_at_can_omit_offset():
     assert payload["captured_at"] == "2026-07-20T14:30:00"
 
 
+def test_facility_type_shapes_the_waveform_not_just_the_field():
+    """프리셋은 그 시설의 법정 밴드 기준 등급이므로 시설이 파형에 반영돼야 한다."""
+    daycare = build_payload("SIM", "s", "FIXED", TS, facility_type="DAYCARE")
+    office = build_payload("SIM", "s", "FIXED", TS, facility_type="OFFICE")
+
+    assert daycare["tvoc"] < office["tvoc"]   # 어린이집 tvoc 나쁨 경계 106
+    assert daycare["pm10"] == office["pm10"]  # pm10은 양쪽 다 좋음 — 보정 없음
+
+
 def test_naive_captured_at_carries_no_timezone_marker():
     formatted = format_captured_at(TS, "none")
     assert "+" not in formatted and "Z" not in formatted

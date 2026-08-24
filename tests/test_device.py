@@ -55,6 +55,27 @@ def test_publishes_naive_kst_captured_at_by_default():
     )
 
 
+def test_wire_payload_uses_the_facility_corrected_waveform():
+    """발행 경로 끝까지 시설이 전달되는지 — 여기서 끊기면 등급 보정이 무의미하다."""
+    daycare = LiveDevice(
+        DeviceCredential(
+            device_id="AQ-DC-001",
+            secret="s",
+            site_id="S-1",
+            device_type="FIXED",
+            facility_type="DAYCARE",
+        ),
+        FakePublisher(),
+    )
+    office = make_device()
+    daycare.publish(TS)
+    office.publish(TS)
+
+    # 어린이집 tvoc '나쁨' 경계는 106 — 사무실은 밴드가 없어 일반값 그대로다.
+    assert json.loads(daycare.publisher.published[0][1])["tvoc"] <= 85
+    assert json.loads(office.publisher.published[0][1])["tvoc"] > 85
+
+
 def test_overrides_are_applied_to_wire_payload():
     device = make_device()
     device.publish(TS, overrides={"pm25": 150})
