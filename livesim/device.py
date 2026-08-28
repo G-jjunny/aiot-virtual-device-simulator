@@ -12,7 +12,13 @@ from typing import Any, Protocol
 import paho.mqtt.client as mqtt
 
 from livesim.config import DeviceCredential
-from livesim.payload import NO_OFFSET, apply_overrides, build_payload, build_topic
+from livesim.payload import (
+    DEFAULT_QUALITY,
+    NO_OFFSET,
+    apply_overrides,
+    build_payload,
+    build_topic,
+)
 from livesim.profiles import DEFAULT_PROFILE
 
 LOG = logging.getLogger("livesim.device")
@@ -139,6 +145,8 @@ class LiveDevice:
     online: bool = True
     profile: str = DEFAULT_PROFILE
     """이 기기가 놓인 환경 등급. 3계층 우선순위 해석 결과를 러너가 넣어준다."""
+    quality: str = DEFAULT_QUALITY
+    """이 기기가 보고하는 측정 품질. 프로파일과 독립된 축이며 값을 바꾸지 않는다."""
     captured_at_offset: str = NO_OFFSET
     max_buffer: int = MAX_BUFFER
     dropped: int = 0
@@ -211,6 +219,7 @@ class LiveDevice:
             seed=seed,
             captured_at_offset=self.captured_at_offset,
             preset=self.profile,
+            quality=self.quality,
         )
 
     def topic(self, suffix: str) -> str:
