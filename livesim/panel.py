@@ -33,6 +33,7 @@ from livesim.config import (
     load_inventory,
     parse_credential,
 )
+from livesim.payload import QUALITY_FLAGS
 from livesim.profiles import DEVICE_FIELDS, PRESET_NAMES, SENSOR_PROFILES
 
 LOG = logging.getLogger("livesim.panel")
@@ -277,6 +278,7 @@ class PanelHandler(BaseHTTPRequestHandler):
             body.get("overrides"),
             site_id=str(body.get("site_id") or ""),
             preset=str(body.get("preset") or ""),
+            quality=str(body.get("quality") or ""),
         )
         return {"ok": True, "type": command, "device_id": device_id}
 
@@ -335,6 +337,7 @@ def _sensor_meta() -> str:
             "fields": {key: list(value) for key, value in DEVICE_FIELDS.items()},
             "burst_defaults": control.DEFAULT_BURST_OVERRIDES,
             "presets": list(PRESET_NAMES),
+            "qualities": list(QUALITY_FLAGS),
         },
         ensure_ascii=False,
     )
@@ -420,6 +423,12 @@ border-radius:6px}
 .env.moderate{background:#3a3411;color:#e3c74a;border-color:#5c5220}
 .env.bad{background:#3d2a11;color:var(--warn);border-color:#6b4718}
 .env.very_bad{background:#3f1717;color:#ff7b7b;border-color:#6e2222}
+/* 품질은 환경 등급과 다른 축이라 색 계열도 다르게 둔다 (보라/적/청회) —
+   같은 주황 계열이면 "오염이 심한 것"으로 오독된다. */
+.qual{border:1px solid transparent}
+.qual.drift{background:#2f2440;color:#c3a2ee;border-color:#4a3a63}
+.qual.error{background:#42151f;color:#ff8fa3;border-color:#6d2534}
+.qual.missing{background:#20262e;color:#9fb2c4;border-color:#38424e}
 .site{color:var(--dim);font-size:10px;margin-top:2px;font-family:ui-monospace,monospace}
 .sitebar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px}
 .sitebar .lbl{color:var(--dim);font-size:11px}
@@ -590,6 +599,16 @@ function envBadge(d){
   if(!p || p===META.presets[0]) return '';   // good은 무표시
   return '<span class="badge env '+esc(p)+'">'+esc(p)+'</span>';
 }
+function setQuality(device_id,quality){
+  cmd('quality',device_id,null,null,null,quality);
+}
+// 품질은 값이 아니라 '그 값을 믿을 수 있는가'다. OK는 정상이므로 무표시 —
+// 29장 카드에 전부 배지가 붙으면 정작 이상한 기기가 묻힌다.
+function qualBadge(d){
+  const q=d.quality;
+  if(!q || q===META.qualities[0]) return '';
+  return '<span class="badge qual '+esc(q.toLowerCase())+'">'+esc(q)+'</span>';
+}
 
 // "아직 안 붙었을 뿐"과 "꺼졌다"는 다르다.
 //
@@ -661,11 +680,11 @@ function releaseButton(){
   if(active && !isEditingControl(active) && active.blur) active.blur();
 }
 
-async function cmd(type,device_id,minutes,overrides,preset){
+async function cmd(type,device_id,minutes,overrides,preset,quality){
   releaseButton();
   try{
     await api('/api/cmd',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({type,device_id,minutes,overrides,preset})});
+      body:JSON.stringify({type,device_id,minutes,overrides,preset,quality})});
     say('명령 전달: '+type+' '+(device_id||''),false);
     openForm=null;
     setTimeout(refresh,600);
@@ -824,7 +843,8 @@ function render(state,invList,force){
  *  (절대 종료시각은 넣는다: 이벤트가 바뀌면 다시 그려야 하므로.) */
 function cardSignature(d,info){
   return JSON.stringify([
-    d.device_id,d.device_type,d.site_id,d.profile,d.connected,d.online,d.pending,
+    d.device_id,d.device_type,d.site_id,d.profile,d.quality,
+    d.connected,d.online,d.pending,
     d.event,d.event_manual,d.event_ends_at,d.disabled,d.disabled_reason,
     info.device_type,info.facility_type,
     openForm===formKey(d.device_id,'dropout'),
@@ -841,6 +861,9 @@ function cardHtml(d,interval,signature){
   const presetOptions=META.presets.map(p=>
     '<option'+(p===(d.profile||META.presets[0])?' selected':'')+'>'+esc(p)+'</option>'
   ).join('');
+  const qualityOptions=META.qualities.map(q=>
+    '<option'+(q===(d.quality||META.qualities[0])?' selected':'')+'>'+esc(q)+'</option>'
+  ).join('');
   return '<div class="card '+cls(d)+'" data-unit="card" data-did="'+id+'"'+
       ' data-sig="'+esc(signature||cardSignature(d,info))+'">'+
     '<div class="paused hidden">갱신 일시정지 — 이 카드의 상태는 낡을 수 있습니다</div>'+
@@ -848,7 +871,7 @@ function cardHtml(d,interval,signature){
     '<div class="meta">'+esc(d.device_type||info.device_type||'')+
       (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
     (site?'<div class="site">site '+esc(shortSite(site))+'…</div>':'')+
-    '<div>'+badges(d)+envBadge(d)+'</div>'+
+    '<div>'+badges(d)+envBadge(d)+qualBadge(d)+'</div>'+
     '<div class="btns">'+
       '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
       '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
@@ -856,6 +879,9 @@ function cardHtml(d,interval,signature){
       '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
       '<select title="환경 등급" onchange="setProfile(\\''+id+'\\',this.value)">'+
         presetOptions+'</select>'+
+      '<select title="측정 품질 — 값은 그대로, 신뢰도만 바뀝니다" '+
+        'onchange="setQuality(\\''+id+'\\',this.value)">'+
+        qualityOptions+'</select>'+
     '</div>'+
     (dropout?dropoutForm(d,interval):'')+
     (burst?burstForm(d,interval):'')+
@@ -944,7 +970,7 @@ $('#inject').onclick=async()=>{
 // 카드·탭·폼의 인라인 onclick/oninput에서 부른다
 Object.assign(window,{cmd,selectType,toggleForm,setMinutes,setTarget,
                       dropTarget,addTarget,draftFor,pointsHint,
-                      selectSite,bulkProfile,setProfile});
+                      selectSite,bulkProfile,setProfile,setQuality});
 refresh();
 setInterval(refresh,2000);        // 데이터 폴링
 setInterval(()=>{                 // 남은시간은 textContent만 패치 (노드 재생성 없음)

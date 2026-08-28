@@ -574,6 +574,98 @@ def test_malformed_json_is_422_not_500(panel):
     assert res.status_code == 422
 
 
+# ---- 측정 품질 ---------------------------------------------------------
+
+
+def test_cmd_forwards_quality_change(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "quality", "device_id": "AQ-01", "quality": "DRIFT"},
+        timeout=5,
+    )
+
+    assert res.status_code == 200
+    command = control.drain_commands(env.control_dir)[0]
+    assert command.command == "quality"
+    assert command.device_id == "AQ-01"
+    assert command.quality == "DRIFT"
+
+
+def test_cmd_rejects_unknown_quality(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "quality", "device_id": "AQ-01", "quality": "SUSPECT"},
+        timeout=5,
+    )
+
+    assert res.status_code == 422
+    assert control.drain_commands(env.control_dir) == []
+
+
+def test_cmd_rejects_quality_without_a_device(panel):
+    base, env = panel
+    res = requests.post(
+        base + "/api/cmd",
+        json={"type": "quality", "quality": "DRIFT"},
+        timeout=5,
+    )
+
+    assert res.status_code == 422
+    assert control.drain_commands(env.control_dir) == []
+
+
+def test_profile_command_is_not_polluted_by_the_quality_field(panel):
+    """두 축은 독립이다 — 프로파일 명령에 품질이 섞여 들어가면 안 된다."""
+    base, env = panel
+    requests.post(
+        base + "/api/cmd",
+        json={"type": "profile", "device_id": "AQ-01", "preset": "bad"},
+        timeout=5,
+    )
+
+    command = control.drain_commands(env.control_dir)[0]
+    assert command.preset == "bad"
+    assert command.quality == ""
+
+
+def test_page_exposes_quality_flags_and_controls(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    # 값 집합은 서버(payload.QUALITY_FLAGS)가 내려보낸다 — JS에 복사본을 두면
+    # 백엔드 enum이 바뀔 때 화면만 조용히 낡는다.
+    assert '"qualities"' in body
+    for flag in ("OK", "DRIFT", "ERROR", "MISSING"):
+        assert flag in body
+    assert "function qualBadge" in body
+    assert "function setQuality" in body
+    # 셀렉트가 **카드에 실제로 붙는지**까지 본다. "qualityOptions를 만든다"만
+    # 확인하면 만들어 놓고 쓰지 않는 상태가 그대로 통과한다 — 실제로 그랬다.
+    assert 'onchange="setQuality(' in body
+    assert "qualityOptions+'</select>'" in body
+
+
+def test_quality_badge_hides_ok_and_colours_the_rest(panel):
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    # OK(=qualities[0])는 무표시. 29장 카드에 전부 배지가 붙으면 이상한 기기가 묻힌다.
+    assert "q===META.qualities[0]" in body
+    for name in (".qual.drift", ".qual.error", ".qual.missing"):
+        assert name in body
+
+
+def test_card_signature_tracks_quality(panel):
+    """서명에 없으면 품질을 바꿔도 카드가 다시 그려지지 않는다."""
+    base, _ = panel
+    body = requests.get(base + "/", timeout=5).text
+
+    signature = body.split("function cardSignature", 1)[1].split("}", 1)[0]
+    assert "d.quality" in signature
+
+
 # ---- /api/inventory (주입) ---------------------------------------------
 
 
