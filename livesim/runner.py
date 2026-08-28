@@ -33,6 +33,7 @@ from livesim.config import (
     load_inventory,
 )
 from livesim.device import LiveDevice, MqttPublisher, Publisher
+from livesim.payload import DEFAULT_QUALITY
 from livesim.profiles import DEFAULT_PROFILE
 from livesim.scheduler import EventScheduler
 
@@ -84,10 +85,18 @@ class TickStats:
 
 @dataclass(frozen=True)
 class ReloadResult:
+    """리로드 diff. 변경 **종류별로** 나눠 담는다.
+
+    한 덩어리(rotated)로 세면 프로파일만 바꾼 리로드가 '자격증명 변경'으로
+    찍혀, 시크릿이 돌아간 줄 알고 오진하게 된다 — 실제로 그랬다.
+    """
+
     ok: bool
     added: tuple[str, ...] = ()
     removed: tuple[str, ...] = ()
-    rotated: tuple[str, ...] = ()
+    secret_changed: tuple[str, ...] = ()
+    profile_changed: tuple[str, ...] = ()
+    quality_changed: tuple[str, ...] = ()
     error: str = ""
 
 
@@ -108,6 +117,7 @@ class DeviceSession:
     disabled: bool = False
     disabled_reason: str = ""
     profile: str = DEFAULT_PROFILE
+    quality: str = DEFAULT_QUALITY
 
 
 class Runner:
@@ -135,6 +145,8 @@ class Runner:
         self.tick_index = 0
         self.profile_overrides: dict[str, str] = {}
         """런타임 환경 등급 변경. 메모리에만 있고 재시작하면 사라진다."""
+        self.quality_overrides: dict[str, str] = {}
+        """런타임 측정 품질 변경. 프로파일과 같은 규칙 — 파일이 진실이다."""
 
     # ---- 준비 -----------------------------------------------------------
 
@@ -151,6 +163,7 @@ class Runner:
         self.order = [item.device_id for item in selected]
         for item in selected:
             self._sync_profile(self.sessions[item.device_id])
+            self._sync_quality(self.sessions[item.device_id])
             self._apply_initial_power(item)
         return selected
 
@@ -174,6 +187,26 @@ class Runner:
         if session.device is not None:
             session.device.profile = preset
         return preset
+
+    def effective_quality(self, credential: DeviceCredential) -> str:
+        """측정 품질 3계층 우선순위.
+
+        런타임(ctl/패널) > devices.yaml 명시 > 기본 OK. 프로파일과 달리 사이트
+        단위 지정은 없다 — 품질은 개별 센서의 신뢰도라 사이트로 묶이지 않는다.
+        """
+        return (
+            self.quality_overrides.get(credential.device_id)
+            or credential.quality
+            or DEFAULT_QUALITY
+        )
+
+    def _sync_quality(self, session: DeviceSession) -> str:
+        """세션과 LiveDevice에 현재 유효 품질을 반영한다."""
+        quality = self.effective_quality(session.credential)
+        session.quality = quality
+        if session.device is not None:
+            session.device.quality = quality
+        return quality
 
     def _apply_initial_power(self, credential: DeviceCredential) -> None:
         """인벤토리의 power: off를 수동 전원차단과 같은 상태로 걸어둔다.
@@ -332,6 +365,9 @@ class Runner:
         if command.command == control.PROFILE:
             self._apply_profile(command)
             return
+        if command.command == control.QUALITY:
+            self._apply_quality(command)
+            return
 
         session = self.sessions.get(command.device_id)
         if session is None:
@@ -381,7 +417,7 @@ class Runner:
             )
 
     def reload_inventory(self) -> ReloadResult:
-        """devices.yaml을 다시 읽어 세션을 맞춘다 (추가/제거/시크릿 변경).
+        """devices.yaml을 다시 읽어 세션을 맞춘다 (추가/제거/시크릿·프로파일·품질 변경).
 
         파일이 깨져 있으면 기존 인벤토리를 그대로 유지한다. 운영 중 오타 하나로
         돌고 있는 플릿 전체가 죽는 것이 리로드 실패보다 훨씬 나쁘다.
@@ -401,7 +437,11 @@ class Runner:
 
         added = [device_id for device_id in wanted if device_id not in current]
         removed = [device_id for device_id in current if device_id not in wanted]
-        rotated: list[str] = []
+        # 변경은 종류별로 센다. 프로파일만 바꾼 리로드가 '시크릿 변경'으로
+        # 찍히면 사람이 토큰 폐기를 의심하며 엉뚱한 곳을 뒤진다.
+        secret_changed: list[str] = []
+        profile_changed: list[str] = []
+        quality_changed: list[str] = []
 
         for device_id in removed:
             session = self.sessions.pop(device_id)
@@ -413,6 +453,7 @@ class Runner:
             if session is None:
                 self.sessions[device_id] = DeviceSession(credential)
                 self._sync_profile(self.sessions[device_id])
+                self._sync_quality(self.sessions[device_id])
                 # 처음 등재되는 기기에만 파일의 초기 전원을 적용한다. 이미 돌고
                 # 있는 기기까지 적용하면 리로드가 사람이 켜둔 기기를 다시 끈다.
                 self._apply_initial_power(credential)
@@ -421,28 +462,45 @@ class Runner:
                 continue
             # 시크릿·소속이 바뀌었다. 지금 붙어 있는 커넥션은 유효하므로 끊지 않고,
             # 다음 재접속 때 새 값으로 토큰을 받게 자격증명만 바꿔 끼운다.
+            previous = session.credential
             session.credential = credential
             if session.device is not None:
                 session.device.credential = credential
-            # 파일의 profile이 바뀌었을 수 있다. 런타임 변경이 있으면 그쪽이 이긴다.
+            # 파일의 profile/quality가 바뀌었을 수 있다. 런타임 변경이 있으면
+            # 그쪽이 이긴다 (두 sync 모두 우선순위를 다시 해석한다).
             self._sync_profile(session)
+            self._sync_quality(session)
             if session.disabled:
                 # 거부됐던 디바이스는 새 시크릿으로 다시 시도할 기회를 준다.
                 session.disabled = False
                 session.disabled_reason = ""
                 session.next_attempt = 0.0
                 session.backoff = 0.0
-            rotated.append(device_id)
+            if previous.secret != credential.secret:
+                secret_changed.append(device_id)
+            if previous.profile != credential.profile:
+                profile_changed.append(device_id)
+            if previous.quality != credential.quality:
+                quality_changed.append(device_id)
 
         self.order = sorted(self.sessions)
         for device_id in added:
             self._connect_new_device(device_id)
+        # 변경이 하나도 없어도 남긴다 — "리로드가 실제로 돌았는가"가 먼저 묻는
+        # 질문이고, 로그가 없으면 명령이 유실된 것과 구분되지 않는다.
         LOG.info(
-            "인벤토리 리로드: 추가 %d, 제거 %d, 자격증명 변경 %d (총 %d대)",
-            len(added), len(removed), len(rotated), len(self.order),
+            "인벤토리 리로드: 추가 %d, 제거 %d, 시크릿 변경 %d, 프로파일 변경 %d, "
+            "품질 변경 %d (총 %d대)",
+            len(added), len(removed), len(secret_changed), len(profile_changed),
+            len(quality_changed), len(self.order),
         )
         return ReloadResult(
-            ok=True, added=tuple(added), removed=tuple(removed), rotated=tuple(rotated)
+            ok=True,
+            added=tuple(added),
+            removed=tuple(removed),
+            secret_changed=tuple(secret_changed),
+            profile_changed=tuple(profile_changed),
+            quality_changed=tuple(quality_changed),
         )
 
     def _connect_new_device(self, device_id: str) -> None:
@@ -480,6 +538,20 @@ class Runner:
             self._sync_profile(self.sessions[device_id])
         LOG.info("[ctl] 환경 등급 %s → %s (%d대)", scope, command.preset, len(targets))
 
+    def _apply_quality(self, command: control.Command) -> None:
+        """측정 품질 플래그를 즉시 바꾼다 (기간 없음).
+
+        측정값은 건드리지 않는다 — 값은 그대로 두고 "이 값을 믿을 수 없다"는
+        보고만 바꾸는 것이 이 명령의 전부다.
+        """
+        session = self.sessions.get(command.device_id)
+        if session is None:
+            LOG.warning("품질 대상 없음: %s", command.device_id)
+            return
+        self.quality_overrides[command.device_id] = command.quality
+        self._sync_quality(session)
+        LOG.info("[ctl] 측정 품질 %s → %s", command.device_id, command.quality)
+
     def _burst_overrides(self) -> dict[str, float]:
         """시나리오의 alert_burst 목표값을 재사용하고, 없으면 내장 기본값."""
         for spec in self.scenario.events:
@@ -503,6 +575,7 @@ class Runner:
                 "device_type": session.credential.device_type,
                 "site_id": session.credential.site_id,
                 "profile": session.profile,
+                "quality": session.quality,
                 "connected": session.connected,
                 "online": session.device.online if session.device else False,
                 "pending": session.device.pending if session.device else 0,
@@ -566,7 +639,8 @@ class Runner:
 
         if session.device is None:
             session.device = LiveDevice(
-                session.credential, publisher, profile=session.profile
+                session.credential, publisher,
+                profile=session.profile, quality=session.quality,
             )
         else:
             session.device.publisher = publisher
