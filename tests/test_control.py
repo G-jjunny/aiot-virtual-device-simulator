@@ -265,6 +265,60 @@ def test_older_command_without_profile_fields_still_reads(tmp_path):
     assert command.site_id == ""
 
 
+# ---- 측정 품질 명령 ----------------------------------------------------
+
+
+def test_quality_command_roundtrip(tmp_path):
+    control.write_command(tmp_path, control.QUALITY, "AQ-01", quality="DRIFT")
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.command == "quality"
+    assert command.device_id == "AQ-01"
+    assert command.quality == "DRIFT"
+
+
+def test_quality_command_requires_a_device(tmp_path):
+    """품질은 개별 센서의 신뢰도라 사이트 단위 지정이 없다."""
+    with pytest.raises(control.ControlError, match="device_id"):
+        control.write_command(tmp_path, control.QUALITY, quality="DRIFT")
+
+
+def test_quality_command_rejects_unknown_flag(tmp_path):
+    with pytest.raises(control.ControlError, match="측정 품질"):
+        control.write_command(tmp_path, control.QUALITY, "AQ-01", quality="SUSPECT")
+
+    assert list(tmp_path.glob("cmd-*.json")) == []
+
+
+def test_quality_command_rejects_an_empty_flag(tmp_path):
+    with pytest.raises(control.ControlError, match="측정 품질"):
+        control.write_command(tmp_path, control.QUALITY, "AQ-01")
+
+
+def test_quality_and_profile_commands_are_separate(tmp_path):
+    """두 축이 서로의 필드를 건드리지 않아야 조합이 성립한다."""
+    control.write_command(tmp_path, control.PROFILE, "AQ-01", preset="bad")
+    control.write_command(tmp_path, control.QUALITY, "AQ-01", quality="ERROR")
+
+    profile, quality = control.drain_commands(tmp_path)
+
+    assert (profile.preset, profile.quality) == ("bad", "")
+    assert (quality.preset, quality.quality) == ("", "ERROR")
+
+
+def test_older_command_without_quality_field_still_reads(tmp_path):
+    (tmp_path / "cmd-old.json").write_text(
+        json.dumps({"command": "profile", "device_id": "AQ-01", "preset": "bad"}),
+        encoding="utf-8",
+    )
+
+    command = control.drain_commands(tmp_path)[0]
+
+    assert command.preset == "bad"
+    assert command.quality == ""
+
+
 # ---- 유형 축약 ---------------------------------------------------------
 
 
