@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from livesim.payload import QUALITY_FLAGS
 from livesim.profiles import DEVICE_FIELDS, PRESET_NAMES, SENSOR_PROFILES
 
 
@@ -277,6 +278,12 @@ class DeviceCredential:
     None과 "good"을 구분해야 한다 — 명시한 good은 사이트 지정을 이기지만,
     미지정은 사이트 지정을 따라야 하기 때문이다.
     """
+    quality: str | None = None
+    """이 기기가 보고하는 측정 품질 플래그. None이면 OK.
+
+    profile과 **독립된 축**이다 — 값의 등급이 아니라 그 값을 믿을 수 있는지를
+    말한다. bad 프로파일 + DRIFT 품질처럼 자유롭게 조합된다.
+    """
     power: str = POWER_ON
     """**초기** 전원 상태. 러너가 이 기기를 처음 등재할 때만 적용된다.
 
@@ -292,7 +299,7 @@ class DeviceCredential:
 
 _INVENTORY_KEYS = {
     "device_id", "secret", "site_id", "device_type", "facility_type", "power",
-    "profile",
+    "profile", "quality",
 }
 
 
@@ -300,6 +307,17 @@ def validate_preset(where: str, value: Any, error: type[ConfigError]) -> str:
     """환경 프리셋 이름 검증. 인벤토리·시나리오·제어 명령이 함께 쓴다."""
     if not isinstance(value, str) or value not in PRESET_NAMES:
         raise error(f"{where}: {PRESET_NAMES} 중 하나여야 합니다 (받은 값: {value!r})")
+    return value
+
+
+def validate_quality(where: str, value: Any, error: type[ConfigError]) -> str:
+    """측정 품질 플래그 검증. 인벤토리와 제어 명령이 함께 쓴다.
+
+    백엔드 QualityFlag와 같은 대문자 값만 받는다 — 소문자를 조용히 올려주면
+    파일과 명령에서 서로 다른 표기가 굳어져, 어느 쪽이 진짜인지 알기 어려워진다.
+    """
+    if not isinstance(value, str) or value not in QUALITY_FLAGS:
+        raise error(f"{where}: {QUALITY_FLAGS} 중 하나여야 합니다 (받은 값: {value!r})")
     return value
 
 
@@ -403,6 +421,10 @@ def parse_credential(where: str, entry: Any) -> DeviceCredential:
     if profile is not None:
         profile = validate_preset(f"{where}.profile", profile, InventoryError)
 
+    quality = entry.get("quality")
+    if quality is not None:
+        quality = validate_quality(f"{where}.quality", quality, InventoryError)
+
     return DeviceCredential(
         device_id=_inventory_text(where, entry, "device_id"),
         secret=_inventory_text(where, entry, "secret"),
@@ -410,6 +432,7 @@ def parse_credential(where: str, entry: Any) -> DeviceCredential:
         device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
         facility_type=_inventory_enum(where, entry, "facility_type", FACILITY_TYPES),
         profile=profile,
+        quality=quality,
         power=power.strip().lower(),
     )
 

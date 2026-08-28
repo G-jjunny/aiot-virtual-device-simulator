@@ -6,6 +6,7 @@
     python -m livesim run scenarios/stress.yaml --devices 10
     python -m livesim --dry-run scenarios/daily-ops.yaml
     python -m livesim ctl off AQ-GANGNAM-01
+    python -m livesim ctl quality AQ-GANGNAM-01 DRIFT
     python -m livesim ctl status
     python -m livesim rehearse
 """
@@ -32,6 +33,7 @@ from livesim.config import (
 )
 from livesim.panel import DEFAULT_HOST as PANEL_DEFAULT_HOST
 from livesim.panel import DEFAULT_PORT as PANEL_DEFAULT_PORT
+from livesim.payload import QUALITY_FLAGS
 from livesim.profiles import PRESET_NAMES
 from livesim.rehearse import rehearse
 from livesim.runner import RunnerError, run, select_devices
@@ -143,13 +145,16 @@ def cmd_ctl(args: argparse.Namespace) -> int:
     device_id = getattr(args, "device_id", "")
     overrides = parse_set_options(getattr(args, "set", None))
     preset = getattr(args, "preset", "")
+    quality = getattr(args, "quality", "")
     control.write_command(
         settings.control_dir, args.ctl_command, device_id, minutes, overrides,
-        preset=preset,
+        preset=preset, quality=quality,
     )
     suffix = f" ({minutes:g}분)" if minutes is not None else ""
     if preset:
         suffix = f" [{preset}]"
+    if quality:
+        suffix = f" [{quality}]"
     target = f" → {device_id}" if device_id else ""
     targets = (
         " " + ", ".join(f"{k}={v:g}" for k, v in overrides.items()) if overrides else ""
@@ -190,7 +195,8 @@ def _print_status(control_dir: str) -> int:
         f"갱신 {state.get('updated_at')}"
     )
     header = (
-        f"{'DEVICE':<22} {'TYPE':<6} {'CONN':<6} {'ONLINE':<7} {'PEND':>5}  EVENT"
+        f"{'DEVICE':<22} {'TYPE':<6} {'CONN':<6} {'ONLINE':<7} {'QUAL':<8} "
+        f"{'PEND':>5}  EVENT"
     )
     print(header)
     print("-" * len(header))
@@ -209,6 +215,8 @@ def _print_status(control_dir: str) -> int:
             f"{control.abbreviate_type(item.get('device_type')):<6} "
             f"{'yes' if item.get('connected') else 'no':<6} "
             f"{'yes' if item.get('online') else 'no':<7} "
+            # 구버전 러너가 쓴 state.json에는 quality가 없다.
+            f"{item.get('quality') or '-':<8} "
             f"{item.get('pending', 0):>5}  {event}"
         )
     return 0
@@ -294,6 +302,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     profile_parser.add_argument("device_id")
     profile_parser.add_argument("preset", choices=PRESET_NAMES)
+
+    quality_parser = ctl_sub.add_parser(
+        control.QUALITY,
+        help="측정 품질 플래그 변경 (상시 — 기간 없음, 재시작 시 소실). "
+             "값은 그대로 두고 신뢰도만 바꾼다",
+    )
+    quality_parser.add_argument("device_id")
+    quality_parser.add_argument("quality", choices=QUALITY_FLAGS)
 
     ctl_sub.add_parser("status", help="state.json을 표로 출력")
     ctl_sub.add_parser(

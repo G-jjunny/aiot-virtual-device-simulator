@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from livesim.payload import QUALITY_FLAGS
 from livesim.profiles import PRESET_NAMES, SENSOR_PROFILES
 
 LOG = logging.getLogger("livesim.control")
@@ -33,12 +34,14 @@ DROPOUT = "dropout"
 BURST = "burst"
 RELOAD = "reload"
 PROFILE = "profile"
-COMMANDS = (OFF, ON, DROPOUT, BURST, RELOAD, PROFILE)
+QUALITY = "quality"
+COMMANDS = (OFF, ON, DROPOUT, BURST, RELOAD, PROFILE, QUALITY)
 
-DEVICE_COMMANDS = (OFF, ON, DROPOUT, BURST)
+DEVICE_COMMANDS = (OFF, ON, DROPOUT, BURST, QUALITY)
 """대상 device_id가 필요한 명령.
 
 reload는 플릿 전체, profile은 기기 또는 사이트 단위라 여기서 빠진다.
+quality는 기기 단위뿐이라 여기 들어간다.
 """
 
 DEFAULT_BURST_OVERRIDES: dict[str, float] = {
@@ -62,6 +65,8 @@ class Command:
     """profile 전용. 사이트 단위 일괄 적용 대상 (device_id 대신)."""
     preset: str = ""
     """profile 전용. 환경 등급 이름."""
+    quality: str = ""
+    """quality 전용. 측정 품질 플래그 (OK/DRIFT/ERROR/MISSING)."""
 
 
 def parse_overrides(raw: Any, strict: bool = True) -> dict[str, float] | None:
@@ -118,6 +123,7 @@ def write_command(
     overrides: dict[str, float] | None = None,
     site_id: str = "",
     preset: str = "",
+    quality: str = "",
 ) -> Path:
     if command not in COMMANDS:
         raise ControlError(f"알 수 없는 명령 '{command}' (사용 가능: {COMMANDS})")
@@ -130,6 +136,10 @@ def write_command(
             raise ControlError(
                 f"알 수 없는 환경 프리셋 '{preset}' (사용 가능: {', '.join(PRESET_NAMES)})"
             )
+    if command == QUALITY and quality not in QUALITY_FLAGS:
+        raise ControlError(
+            f"알 수 없는 측정 품질 '{quality}' (사용 가능: {', '.join(QUALITY_FLAGS)})"
+        )
     overrides = parse_overrides(overrides)
     directory = Path(control_dir)
     directory.mkdir(parents=True, exist_ok=True)
@@ -146,6 +156,7 @@ def write_command(
             "overrides": overrides,
             "site_id": site_id,
             "preset": preset,
+            "quality": quality,
         },
     )
     return path
@@ -176,6 +187,7 @@ def drain_commands(control_dir: str | Path) -> list[Command]:
                     overrides=parse_overrides(raw.get("overrides"), strict=False),
                     site_id=str(raw.get("site_id") or ""),
                     preset=str(raw.get("preset") or ""),
+                    quality=str(raw.get("quality") or ""),
                 )
             )
         except Exception as exc:

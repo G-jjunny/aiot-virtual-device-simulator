@@ -13,6 +13,16 @@ KST_OFFSET = "+09:00"
 NO_OFFSET = "none"
 DEFAULT_FW_VERSION = "1.0.0-sim"
 
+# 측정 품질 플래그 — 백엔드 QualityFlag enum과 같은 값 집합이어야 한다.
+# 여기서 갈리면 업로드는 성공하는데 백엔드가 알 수 없는 값으로 읽는다.
+#
+# 프리셋(profile)과는 **독립된 축**이다. 프리셋은 "값이 얼마나 나쁜가"이고
+# 품질은 "그 값을 믿을 수 있는가"다. 그래서 품질은 측정값을 바꾸지 않는다 —
+# 값은 정상인데 센서가 스스로를 신뢰할 수 없다고 보고하는 상태를 모의한다.
+QUALITY_OK = "OK"
+QUALITY_FLAGS = (QUALITY_OK, "DRIFT", "ERROR", "MISSING")
+DEFAULT_QUALITY = QUALITY_OK
+
 
 def format_captured_at(ts: datetime, offset: str = KST_OFFSET) -> str:
     """ISO-8601 문자열. offset="none"이면 오프셋 없이 반환한다.
@@ -37,6 +47,7 @@ def build_payload(
     seed: int = 0,
     captured_at_offset: str = KST_OFFSET,
     preset: str = DEFAULT_PROFILE,
+    quality: str = DEFAULT_QUALITY,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "device_id": device_id,
@@ -44,7 +55,7 @@ def build_payload(
         "device_type": device_type,
         "captured_at": format_captured_at(ts, captured_at_offset),
         "schema_version": 1,
-        "quality": "OK",
+        "quality": quality,
         "fw_version": DEFAULT_FW_VERSION,
         "battery_pct": 87,
         "rssi": -62,

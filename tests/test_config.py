@@ -454,3 +454,59 @@ def test_directory_at_scenario_path_explains_the_mount_mistake(tmp_path):
 
     with pytest.raises(ScenarioError, match="디렉터리"):
         load_scenario(target)
+
+
+# ---- 측정 품질 ---------------------------------------------------------
+
+
+def with_quality(value: str) -> str:
+    return VALID_INVENTORY.replace(
+        "    facility_type: OFFICE",
+        f"    facility_type: OFFICE\n    quality: {value}",
+        1,
+    )
+
+
+def test_quality_defaults_to_none(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, VALID_INVENTORY))
+
+    assert inventory[0].quality is None
+
+
+def test_device_quality_is_parsed(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, with_quality("DRIFT")))
+
+    assert inventory[0].quality == "DRIFT"
+
+
+@pytest.mark.parametrize("flag", ["OK", "DRIFT", "ERROR", "MISSING"])
+def test_all_backend_quality_flags_are_accepted(tmp_path, flag):
+    """백엔드 QualityFlag 4종과 값 집합이 어긋나면 안 된다."""
+    inventory = load_inventory(write_inventory(tmp_path, with_quality(flag)))
+
+    assert inventory[0].quality == flag
+
+
+def test_rejects_unknown_quality(tmp_path):
+    with pytest.raises(InventoryError, match="quality"):
+        load_inventory(write_inventory(tmp_path, with_quality("SUSPECT")))
+
+
+def test_rejects_lowercase_quality(tmp_path):
+    """백엔드 enum은 대문자다 — 조용히 올려주면 표기가 두 벌이 된다."""
+    with pytest.raises(InventoryError, match="quality"):
+        load_inventory(write_inventory(tmp_path, with_quality("drift")))
+
+
+def test_profile_and_quality_coexist_on_one_device(tmp_path):
+    """독립된 두 축이므로 한 항목에 함께 적을 수 있어야 한다."""
+    body = VALID_INVENTORY.replace(
+        "    facility_type: OFFICE",
+        "    facility_type: OFFICE\n    profile: bad\n    quality: DRIFT",
+        1,
+    )
+
+    inventory = load_inventory(write_inventory(tmp_path, body))
+
+    assert inventory[0].profile == "bad"
+    assert inventory[0].quality == "DRIFT"

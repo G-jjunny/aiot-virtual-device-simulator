@@ -59,3 +59,21 @@ devices:
     device_type: FIXED
     facility_type: SCHOOL
     profile: bad
+
+  # quality: 이 기기가 보고하는 **측정 품질 플래그**
+  # (OK | DRIFT | ERROR | MISSING, 생략 시 OK). 백엔드 QualityFlag와 같은 값입니다.
+  #
+  # profile과는 **독립된 축**입니다. profile은 "값이 얼마나 나쁜가"이고
+  # quality는 "그 값을 믿을 수 있는가"입니다 — quality를 바꿔도 측정값은
+  # 그대로이고, 센서가 스스로를 신뢰할 수 없다고 보고하는 상태만 모의합니다.
+  # 두 축은 자유롭게 조합됩니다 (예: profile: bad + quality: DRIFT).
+  #
+  # 우선순위: 런타임(ctl/패널) > 여기 > OK. 사이트 단위 지정은 없습니다.
+  # 런타임 변경(livesim ctl quality <device_id> DRIFT)은 재시작하면 사라집니다.
+  - device_id: AQ-YEONGDEUNGPO-02
+    secret: "여기에-발급받은-시크릿"
+    site_id: "660e8400-e29b-41d4-a716-446655441111"
+    device_type: FIXED
+    facility_type: SCHOOL
+    profile: bad
+    quality: DRIFT

@@ -152,3 +152,55 @@ def test_topic_is_lowercase_and_ordered():
 def test_batch_topic_suffix():
     topic = build_topic("SCHOOL", "s1", "PORTABLE", "SIM-002", "sensor/batch")
     assert topic.endswith("/SIM-002/sensor/batch")
+
+
+# ---- 측정 품질 -----------------------------------------------------------
+
+
+def test_quality_defaults_to_ok():
+    assert make()["quality"] == "OK"
+
+
+def test_quality_flag_is_carried_into_the_payload():
+    payload = build_payload("SIM-001", "site", "FIXED", TS, quality="DRIFT")
+
+    assert payload["quality"] == "DRIFT"
+
+
+def test_quality_does_not_change_measured_values():
+    """품질은 신뢰도 축이다 — 값 생성에는 손대지 않는다.
+
+    이 성질이 깨지면 "값은 정상인데 센서가 못 믿겠다고 보고한다"는 시나리오
+    자체를 만들 수 없다. FE의 '판정 불가는 경보로 울리지 않는다' 검증이
+    바로 그 상태를 요구한다.
+    """
+    ok = build_payload("SIM-001", "s", "FIXED", TS, facility_type="OFFICE")
+    error = build_payload(
+        "SIM-001", "s", "FIXED", TS, facility_type="OFFICE", quality="ERROR"
+    )
+
+    assert error["quality"] == "ERROR"
+    assert {k: v for k, v in ok.items() if k != "quality"} == {
+        k: v for k, v in error.items() if k != "quality"
+    }
+
+
+def test_quality_and_preset_are_independent_axes():
+    """bad 프로파일 + DRIFT 품질 조합이 성립해야 한다."""
+    good_ok = build_payload("SIM", "s", "FIXED", TS, facility_type="OFFICE")
+    bad_drift = build_payload(
+        "SIM", "s", "FIXED", TS, facility_type="OFFICE", preset="bad", quality="DRIFT"
+    )
+
+    assert bad_drift["quality"] == "DRIFT"
+    assert bad_drift["pm25"] > good_ok["pm25"]      # 프리셋은 그대로 값을 민다
+
+
+def test_burst_overrides_do_not_touch_quality():
+    """버스트 중에도 품질 플래그는 유지된다 (overrides는 센서 값만 다룬다)."""
+    payload = apply_overrides(
+        build_payload("SIM", "s", "FIXED", TS, quality="MISSING"), {"pm25": 300.0}
+    )
+
+    assert payload["quality"] == "MISSING"
+    assert payload["pm25"] == 300.0

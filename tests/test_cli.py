@@ -2,7 +2,13 @@
 
 import pytest
 
-from livesim.__main__ import build_parser, normalize_argv, parse_set_options
+from livesim import control
+from livesim.__main__ import (
+    build_parser,
+    main,
+    normalize_argv,
+    parse_set_options,
+)
 from livesim.control import ControlError
 
 
@@ -146,6 +152,36 @@ def test_ctl_profile_rejects_unknown_preset():
         parse(["ctl", "profile", "AQ-01", "awful"])
 
 
+def test_ctl_quality_parses():
+    args = parse(["ctl", "quality", "AQ-01", "DRIFT"])
+
+    assert args.ctl_command == "quality"
+    assert args.device_id == "AQ-01"
+    assert args.quality == "DRIFT"
+
+
+@pytest.mark.parametrize("flag", ["OK", "DRIFT", "ERROR", "MISSING"])
+def test_ctl_quality_accepts_every_backend_flag(flag):
+    assert parse(["ctl", "quality", "AQ-01", flag]).quality == flag
+
+
+def test_ctl_quality_rejects_unknown_flag():
+    with pytest.raises(SystemExit):
+        parse(["ctl", "quality", "AQ-01", "SUSPECT"])
+
+
+def test_ctl_quality_rejects_lowercase_flag():
+    """백엔드 enum 표기(대문자)에 맞춘다."""
+    with pytest.raises(SystemExit):
+        parse(["ctl", "quality", "AQ-01", "drift"])
+
+
+def test_ctl_quality_has_no_duration():
+    """바꿀 때까지 유지되는 상태라 기간 개념이 없다."""
+    with pytest.raises(SystemExit):
+        parse(["ctl", "quality", "AQ-01", "DRIFT", "--minutes", "5"])
+
+
 def test_ctl_without_subcommand_is_rejected():
     with pytest.raises(SystemExit):
         parse(["ctl"])
@@ -185,3 +221,52 @@ def test_panel_accepts_host_and_port():
 
 def test_panel_is_a_known_subcommand():
     assert normalize_argv(["panel"]) == ["panel"]
+
+
+# ---- ctl status 표 -----------------------------------------------------
+
+
+def write_status(tmp_path, device):
+    control.write_state(
+        tmp_path,
+        {
+            "scenario": "t",
+            "tick": 1,
+            "updated_at": "2026-08-28T10:00:00",
+            "devices": [device],
+        },
+    )
+
+
+def run_status(tmp_path, monkeypatch, capsys, device):
+    write_status(tmp_path, device)
+    monkeypatch.setenv("CONTROL_DIR", str(tmp_path))
+
+    assert main(["ctl", "status"]) == 0
+
+    return capsys.readouterr().out
+
+
+def test_ctl_status_shows_the_quality_column(tmp_path, monkeypatch, capsys):
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "AQ-01", "device_type": "FIXED", "connected": True,
+         "online": True, "pending": 0, "profile": "bad", "quality": "DRIFT"},
+    )
+
+    assert "QUAL" in out
+    assert "DRIFT" in out
+
+
+def test_ctl_status_marks_missing_quality_for_older_state_files(
+    tmp_path, monkeypatch, capsys
+):
+    """구버전 러너가 쓴 state.json에는 quality가 없다 — 죽지 말고 '-'로."""
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "AQ-01", "device_type": "FIXED", "connected": True,
+         "online": True, "pending": 0},
+    )
+
+    assert "QUAL" in out
+    assert "AQ-01" in out

@@ -1,4 +1,5 @@
 import json
+import logging
 import random
 from datetime import datetime
 
@@ -195,6 +196,129 @@ def test_snapshot_exposes_profile_and_site(tmp_path):
     assert device["site_id"] == "S-1"
 
 
+# ---- 측정 품질 3계층 -----------------------------------------------------
+#
+# 프로파일과 **독립된 축**이다. 프로파일은 값을 밀어 올리고, 품질은 값을 그대로
+# 둔 채 "이 값을 믿을 수 있는가"만 바꾼다.
+
+
+def qual_cred(device_id="AQ-1", quality=None, profile=None, site_id="S-1"):
+    return DeviceCredential(
+        device_id=device_id, secret="s", site_id=site_id,
+        device_type="FIXED", facility_type="OFFICE",
+        profile=profile, quality=quality,
+    )
+
+
+def test_quality_defaults_to_ok():
+    runner, _ = profile_runner([qual_cred()])
+
+    assert runner.sessions["AQ-1"].quality == "OK"
+
+
+def test_device_quality_from_the_file_is_applied():
+    runner, _ = profile_runner([qual_cred(quality="DRIFT")])
+
+    assert runner.sessions["AQ-1"].quality == "DRIFT"
+
+
+def test_runtime_quality_beats_the_file(tmp_path):
+    runner, _ = profile_runner([qual_cred(quality="DRIFT")], control_dir=str(tmp_path))
+
+    control.write_command(tmp_path, control.QUALITY, "AQ-1", quality="ERROR")
+    runner.drain_control()
+
+    assert runner.sessions["AQ-1"].quality == "ERROR"
+
+
+def test_quality_command_reaches_the_published_payload(tmp_path):
+    runner, connector = profile_runner([qual_cred()], control_dir=str(tmp_path))
+    runner.tick(TS, now=0.0)
+    assert json.loads(connector.publishers[0].published[0][1])["quality"] == "OK"
+
+    control.write_command(tmp_path, control.QUALITY, "AQ-1", quality="MISSING")
+    runner.drain_control()
+    runner.tick(TS, now=300.0)
+
+    assert json.loads(connector.publishers[0].published[-1][1])["quality"] == "MISSING"
+
+
+def test_quality_does_not_change_the_measured_values(tmp_path):
+    """같은 틱·같은 기기라면 품질만 다른 두 페이로드의 값은 완전히 같아야 한다."""
+    ok_runner, ok_connector = profile_runner([qual_cred()])
+    drift_runner, drift_connector = profile_runner([qual_cred(quality="DRIFT")])
+    ok_runner.tick(TS, now=0.0)
+    drift_runner.tick(TS, now=0.0)
+
+    ok = json.loads(ok_connector.publishers[0].published[0][1])
+    drift = json.loads(drift_connector.publishers[0].published[0][1])
+
+    assert (ok["quality"], drift["quality"]) == ("OK", "DRIFT")
+    assert {k: v for k, v in ok.items() if k != "quality"} == {
+        k: v for k, v in drift.items() if k != "quality"
+    }
+
+
+def test_profile_and_quality_combine_independently(tmp_path):
+    """bad 프로파일 + DRIFT 품질 — 두 축이 서로를 덮지 않는다."""
+    runner, connector = profile_runner([qual_cred(quality="DRIFT", profile="bad")])
+    clean, _ = profile_runner([qual_cred()])
+    clean.tick(TS, now=0.0)
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    baseline = json.loads(clean.sessions["AQ-1"].device.publisher.published[0][1])
+
+    assert runner.sessions["AQ-1"].profile == "bad"
+    assert payload["quality"] == "DRIFT"
+    assert payload["pm25"] > baseline["pm25"]      # 프로파일은 여전히 값을 민다
+
+
+def test_runtime_quality_change_keeps_the_profile(tmp_path):
+    runner, _ = profile_runner([qual_cred(profile="bad")], control_dir=str(tmp_path))
+
+    control.write_command(tmp_path, control.QUALITY, "AQ-1", quality="ERROR")
+    runner.drain_control()
+
+    assert runner.sessions["AQ-1"].profile == "bad"
+    assert runner.sessions["AQ-1"].quality == "ERROR"
+
+
+def test_quality_survives_a_burst(tmp_path):
+    """버스트 중에도 품질 플래그는 유지된다."""
+    runner, connector = profile_runner(
+        [qual_cred(quality="DRIFT")], control_dir=str(tmp_path)
+    )
+
+    control.write_command(
+        tmp_path, control.BURST, "AQ-1", minutes=60, overrides={"pm25": 300.0}
+    )
+    runner.drain_control()
+    runner.tick(TS, now=0.0)
+
+    payload = json.loads(connector.publishers[0].published[0][1])
+    assert payload["quality"] == "DRIFT"
+    assert payload["pm25"] > 200                   # 버스트는 정상 적용됐다
+
+
+def test_quality_command_for_an_unknown_device_is_ignored(tmp_path):
+    runner, _ = profile_runner([qual_cred()], control_dir=str(tmp_path))
+
+    control.write_command(tmp_path, control.QUALITY, "NOPE", quality="ERROR")
+    runner.drain_control()
+
+    assert runner.sessions["AQ-1"].quality == "OK"
+
+
+def test_snapshot_exposes_quality(tmp_path):
+    runner, _ = profile_runner([qual_cred(quality="DRIFT")], control_dir=str(tmp_path))
+
+    device = runner.snapshot()["devices"][0]
+
+    assert device["quality"] == "DRIFT"
+    assert device["profile"] == "good"             # 두 축이 나란히 실린다
+
+
 # ---- 인벤토리 핫 리로드 -------------------------------------------------
 
 
@@ -385,7 +509,8 @@ def test_reload_swaps_a_changed_secret_without_dropping_the_connection(tmp_path)
     path.write_text("devices:\n" + entry("AQ-1", "rotated"), encoding="utf-8")
     result = runner.reload_inventory()
 
-    assert result.rotated == ("AQ-1",)
+    assert result.secret_changed == ("AQ-1",)
+    assert result.profile_changed == ()      # 시크릿만 바뀌었다
     assert runner.sessions["AQ-1"].credential.secret == "rotated"
     assert runner.sessions["AQ-1"].device.credential.secret == "rotated"
     assert runner.sessions["AQ-1"].connected is True  # 끊지 않았다
@@ -403,6 +528,124 @@ def test_rotated_secret_re_enables_a_rejected_device(tmp_path):
 
     assert runner.sessions["AQ-1"].disabled is False
     assert runner.tick(TS, now=10.0).published == 1
+
+
+# ---- 리로드 diff 라벨 (변경 종류별 집계) ---------------------------------
+#
+# 예전에는 어떤 변경이든 rotated 하나로 세어 "자격증명 변경 N"으로 찍혔다.
+# 프로파일만 바꾼 리로드가 시크릿이 돌아간 것처럼 보여 오진을 불렀다.
+
+
+def entry_with(device_id: str, secret: str | None = None, **fields: str) -> str:
+    body = entry(device_id, secret)
+    for key, value in fields.items():
+        body += f"    {key}: {value}\n"
+    return body
+
+
+def reload_log(caplog) -> str:
+    lines = [m for m in caplog.messages if m.startswith("인벤토리 리로드")]
+    assert lines, caplog.messages
+    return lines[-1]
+
+
+def test_reload_labels_a_profile_change_as_profile_not_secret(tmp_path, caplog):
+    runner, _, path = reload_runner(tmp_path)
+
+    path.write_text("devices:\n" + entry_with("AQ-1", profile="bad"), encoding="utf-8")
+    with caplog.at_level(logging.INFO, logger="livesim.runner"):
+        result = runner.reload_inventory()
+
+    assert result.profile_changed == ("AQ-1",)
+    assert result.secret_changed == ()
+    assert runner.sessions["AQ-1"].profile == "bad"
+    message = reload_log(caplog)
+    assert "프로파일 변경 1" in message
+    assert "시크릿 변경 0" in message
+
+
+def test_reload_labels_a_quality_change_as_quality(tmp_path, caplog):
+    runner, _, path = reload_runner(tmp_path)
+
+    path.write_text(
+        "devices:\n" + entry_with("AQ-1", quality="DRIFT"), encoding="utf-8"
+    )
+    with caplog.at_level(logging.INFO, logger="livesim.runner"):
+        result = runner.reload_inventory()
+
+    assert result.quality_changed == ("AQ-1",)
+    assert result.secret_changed == ()
+    assert result.profile_changed == ()
+    assert runner.sessions["AQ-1"].quality == "DRIFT"
+    assert "품질 변경 1" in reload_log(caplog)
+
+
+def test_reload_counts_each_kind_of_change_separately(tmp_path, caplog):
+    runner, _, path = reload_runner(tmp_path, ("AQ-1", "AQ-2", "AQ-3"))
+
+    path.write_text(
+        "devices:\n"
+        + entry_with("AQ-1", "rotated")
+        + entry_with("AQ-2", profile="bad")
+        + entry_with("AQ-3", quality="ERROR")
+        + entry_with("AQ-4"),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.INFO, logger="livesim.runner"):
+        result = runner.reload_inventory()
+
+    assert result.added == ("AQ-4",)
+    assert result.removed == ()
+    assert result.secret_changed == ("AQ-1",)
+    assert result.profile_changed == ("AQ-2",)
+    assert result.quality_changed == ("AQ-3",)
+    message = reload_log(caplog)
+    for part in ("추가 1", "제거 0", "시크릿 변경 1", "프로파일 변경 1", "품질 변경 1"):
+        assert part in message, message
+    assert "총 4대" in message
+
+
+def test_reload_logs_even_when_nothing_changed(tmp_path, caplog):
+    """변경이 없어도 '리로드가 실제로 돌았다'는 사실은 남아야 한다."""
+    runner, _, path = reload_runner(tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="livesim.runner"):
+        result = runner.reload_inventory()
+
+    assert result.ok is True
+    assert (result.added, result.removed, result.secret_changed,
+            result.profile_changed, result.quality_changed) == ((), (), (), (), ())
+    assert "총 1대" in reload_log(caplog)
+
+
+def test_reload_applies_a_file_quality_change_to_the_live_device(tmp_path):
+    runner, connector, path = reload_runner(tmp_path)
+    runner.tick(TS, now=0.0)
+
+    path.write_text(
+        "devices:\n" + entry_with("AQ-1", quality="ERROR"), encoding="utf-8"
+    )
+    runner.reload_inventory()
+    runner.tick(TS, now=300.0)
+
+    payload = json.loads(connector.publishers[0].published[-1][1])
+    assert payload["quality"] == "ERROR"
+
+
+def test_runtime_quality_beats_a_reloaded_file_value(tmp_path):
+    """런타임 변경이 파일 값을 이기는 규칙은 리로드를 건너서도 유지된다."""
+    control_dir = tmp_path / "control"
+    runner, _, path = reload_runner(tmp_path, control_dir=str(control_dir))
+    control.write_command(control_dir, control.QUALITY, "AQ-1", quality="MISSING")
+    runner.drain_control()
+
+    path.write_text(
+        "devices:\n" + entry_with("AQ-1", quality="DRIFT"), encoding="utf-8"
+    )
+    result = runner.reload_inventory()
+
+    assert result.quality_changed == ("AQ-1",)             # 파일은 분명히 바뀌었고
+    assert runner.sessions["AQ-1"].quality == "MISSING"    # 런타임이 이긴다
 
 
 def test_reload_keeps_fleet_when_file_is_broken(tmp_path):
