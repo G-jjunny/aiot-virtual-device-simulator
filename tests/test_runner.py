@@ -4,6 +4,7 @@ import random
 from datetime import datetime
 
 import pytest
+import requests_mock
 
 from livesim import control
 from livesim.api import ApiError
@@ -1331,3 +1332,379 @@ def test_kst_now_is_naive_and_second_resolution():
     now = kst_now()
     assert now.tzinfo is None
     assert now.microsecond == 0
+
+
+# ---- 에이티온 HTTP 경로 -------------------------------------------------
+#
+# 이 경로에는 커넥션·백오프·오프라인 버퍼가 없다. 그래서 확인할 것은 "MQTT
+# 수명 관리를 건드리지 않고" 틱마다 HTTP로 나가는가, 그리고 실패가 그 기기에만
+# 갇히는가다.
+
+ATION_BASE = "http://api"
+INGEST_URL = f"{ATION_BASE}/v1/biometric/ingest"
+
+
+def ation_credential(device_id: str = "WB-ATION-1", **kwargs) -> DeviceCredential:
+    fields = {
+        "device_id": device_id,
+        "secret": "",
+        "site_id": "S-1",
+        "device_type": "WEARABLE",
+        "facility_type": "OFFICE",
+        "transport": "ation_http",
+    }
+    fields.update(kwargs)
+    return DeviceCredential(**fields)
+
+
+def mixed_runner(credentials, events=(), **kwargs):
+    connector = FakeConnector()
+    runner = Runner(
+        kwargs.pop("scenario", None) or scenario(events),
+        credentials,
+        connector,
+        rng=random.Random(1),
+        clock=lambda: 0.0,
+        api_base_url=ATION_BASE,
+        **kwargs,
+    )
+    return runner, connector
+
+
+def ok_mock(mock):
+    mock.post(INGEST_URL, json={"result": "success"})
+    return mock
+
+
+def test_ation_device_posts_over_http_and_never_opens_a_connection():
+    runner, connector = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        stats = runner.tick(TS, 0.0)
+        body = mock.last_request.json()
+        path = mock.last_request.path
+
+    assert stats.published == 1
+    assert connector.calls == []            # 토큰 교환도 MQTT CONNECT도 없다
+    assert body["device"]["DEVICE_ID"] == "WB-ATION-1"
+    assert path == "/v1/biometric/ingest"
+
+
+def test_ation_and_mqtt_devices_publish_side_by_side():
+    runner, connector = mixed_runner([credential("AQ-1"), ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        stats = runner.tick(TS, 0.0)
+
+    assert stats.published == 2
+    assert connector.calls == ["AQ-1"]      # MQTT 기기만 접속한다
+    assert len(connector.publishers[0].published) == 1
+
+
+def test_http_failure_is_contained_to_that_device():
+    runner, _ = mixed_runner(
+        [credential("AQ-1"), ation_credential("WB-A"), ation_credential("WB-B")]
+    )
+    runner.start()
+
+    def reply(request, context):
+        if request.json()["device"]["DEVICE_ID"] == "WB-A":
+            context.status_code = 403
+            return {"errorCode": "FORBIDDEN"}
+        return {"result": "success"}
+
+    with requests_mock.Mocker() as mock:
+        mock.post(INGEST_URL, json=reply)
+        stats = runner.tick(TS, 0.0)
+
+    assert stats.failed == 1
+    assert stats.published == 2             # MQTT 1대 + 성공한 HTTP 1대
+    assert runner.sessions["WB-A"].connected is False
+    assert runner.sessions["WB-B"].connected is True
+
+
+def test_http_failure_logs_the_ip_whitelist_cause(caplog):
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        mock.post(INGEST_URL, status_code=403, json={"errorCode": "FORBIDDEN"})
+        with caplog.at_level(logging.ERROR):
+            runner.tick(TS, 0.0)
+
+    assert "ATION_ALLOWED_IPS" in caplog.text
+
+
+def test_http_failure_retries_on_the_next_tick():
+    """백오프를 두지 않는다 — 원인이 풀린 순간을 늦게 알아채면 안 된다."""
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        mock.post(INGEST_URL, status_code=500, json={"errorCode": "OOPS"})
+        first = runner.tick(TS, 0.0)
+        ok_mock(mock)
+        second = runner.tick(TS, 0.0)
+
+    assert first.failed == 1
+    assert second.published == 1
+
+
+def test_ctl_off_and_on_control_ation_publishing():
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        runner._apply_command(
+            control.Command(command=control.OFF, device_id="WB-ATION-1")
+        )
+        off = runner.tick(TS, 0.0)
+        runner._apply_command(
+            control.Command(command=control.ON, device_id="WB-ATION-1")
+        )
+        on = runner.tick(TS, 0.0)
+
+    assert off.powered_off == 1 and off.published == 0
+    assert on.published == 1
+
+
+def test_dropout_is_degraded_to_silence_with_a_log(caplog):
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        with caplog.at_level(logging.INFO):
+            runner._apply_command(
+                control.Command(
+                    command=control.DROPOUT, device_id="WB-ATION-1", minutes=10
+                )
+            )
+            stats = runner.tick(TS, 0.0)
+        history = list(mock.request_history)
+
+    assert stats.silenced == 1              # 버퍼링이 아니라 유실
+    assert stats.buffered == 0
+    assert stats.published == 0
+    assert history == []
+    assert "dropout 격하" in caplog.text
+    assert runner.sessions["WB-ATION-1"].ation is None   # 버퍼도 만들지 않는다
+
+
+def test_scheduled_dropout_also_degrades():
+    events = [EventSpec("dropout", CERTAIN, (5.0, 5.0))]
+    runner, _ = mixed_runner([ation_credential()], events=events)
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        stats = runner.tick(TS, 0.0)
+        history = list(mock.request_history)
+
+    assert stats.silenced == 1
+    assert history == []
+
+
+def test_silence_stops_ation_publishing_too():
+    events = [EventSpec("silence", CERTAIN, (5.0, 5.0))]
+    runner, _ = mixed_runner([ation_credential()], events=events)
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        stats = runner.tick(TS, 0.0)
+        history = list(mock.request_history)
+
+    assert stats.silenced == 1
+    assert history == []
+
+
+def test_profile_applies_to_the_ation_payload():
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        runner.tick(TS, 0.0)
+        good = mock.last_request.json()["device"]["PPG_HR"]
+        runner._apply_command(
+            control.Command(
+                command=control.PROFILE, device_id="WB-ATION-1", preset="very_bad"
+            )
+        )
+        runner.tick(TS, 0.0)
+        worse = mock.last_request.json()["device"]["PPG_HR"]
+
+    assert worse > good
+
+
+def test_burst_overrides_reach_the_ation_payload():
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        runner.tick(TS, 0.0)
+        plain = mock.last_request.json()["device"]["PPG_HR"]
+        runner._apply_command(
+            control.Command(
+                command=control.BURST,
+                device_id="WB-ATION-1",
+                minutes=30,
+                overrides={"heart_rate": 170.0},
+            )
+        )
+        runner.tick(TS, 0.0)
+        burst = mock.last_request.json()["device"]["PPG_HR"]
+
+    assert burst > plain
+
+
+def test_quality_command_is_refused_with_a_reason(caplog):
+    """규격에 품질 필드가 없다 — 조용히 삼키면 '걸었는데 아무 일도 없다'가 된다."""
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with caplog.at_level(logging.WARNING):
+        runner._apply_command(
+            control.Command(
+                command=control.QUALITY, device_id="WB-ATION-1", quality="DRIFT"
+            )
+        )
+
+    assert "ation_http" in caplog.text
+    assert "WB-ATION-1" not in runner.quality_overrides
+    assert runner.sessions["WB-ATION-1"].quality == "OK"
+
+
+# ---- 상태 노출 ----------------------------------------------------------
+
+
+def test_snapshot_marks_transport_and_hides_mqtt_only_state():
+    runner, _ = mixed_runner([credential("AQ-1"), ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        runner.tick(TS, 0.0)
+
+    devices = {item["device_id"]: item for item in runner.snapshot()["devices"]}
+    ation = devices["WB-ATION-1"]
+
+    assert ation["transport"] == "ation_http"
+    assert ation["connected"] is True       # 직전 전송이 성공했다
+    assert ation["online"] is True          # 오프라인 버퍼 개념이 없다
+    assert ation["pending"] == 0
+    assert ation["quality"] is None         # 이 경로에는 품질 축이 없다
+    assert devices["AQ-1"]["transport"] == "mqtt"
+    assert devices["AQ-1"]["quality"] == "OK"
+
+
+def test_snapshot_reports_a_failed_send_as_not_connected():
+    runner, _ = mixed_runner([ation_credential()])
+    runner.start()
+
+    with requests_mock.Mocker() as mock:
+        mock.post(INGEST_URL, status_code=403, json={"errorCode": "FORBIDDEN"})
+        runner.tick(TS, 0.0)
+
+    assert runner.snapshot()["devices"][0]["connected"] is False
+
+
+# ---- 리로드 -------------------------------------------------------------
+
+
+ATION_RELOAD = """
+devices:
+  - device_id: WB-1
+    site_id: S-1
+    device_type: WEARABLE
+    facility_type: OFFICE
+    transport: ation_http
+"""
+
+MQTT_RELOAD = """
+devices:
+  - device_id: WB-1
+    secret: s3cr3t
+    site_id: S-1
+    device_type: WEARABLE
+    facility_type: OFFICE
+"""
+
+
+def write_devices(tmp_path, body: str):
+    path = tmp_path / "devices.yaml"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def mqtt_wearable() -> DeviceCredential:
+    return DeviceCredential(
+        device_id="WB-1",
+        secret="s3cr3t",
+        site_id="S-1",
+        device_type="WEARABLE",
+        facility_type="OFFICE",
+    )
+
+
+def test_reload_counts_transport_changes_separately(tmp_path):
+    """시크릿·프로파일 변경과 뭉뚱그리면 경로가 바뀐 줄 모른 채 원인을 딴 데서 찾는다."""
+    path = write_devices(tmp_path, MQTT_RELOAD)
+    runner, _ = mixed_runner([mqtt_wearable()], devices_file=str(path))
+    runner.start()
+    path.write_text(ATION_RELOAD, encoding="utf-8")
+
+    result = runner.reload_inventory()
+
+    assert result.transport_changed == ("WB-1",)
+    assert result.profile_changed == ()
+    assert result.quality_changed == ()
+    assert runner.sessions["WB-1"].credential.uses_ation_http
+
+
+def test_switching_to_ation_http_drops_the_mqtt_connection(tmp_path):
+    path = write_devices(tmp_path, MQTT_RELOAD)
+    runner, connector = mixed_runner([mqtt_wearable()], devices_file=str(path))
+    runner.start()
+    runner.tick(TS, 0.0)
+    path.write_text(ATION_RELOAD, encoding="utf-8")
+
+    runner.reload_inventory()
+
+    assert connector.publishers[0].disconnected
+    assert runner.sessions["WB-1"].device is None
+    assert runner.sessions["WB-1"].connected is False
+
+
+def test_switching_back_to_mqtt_drops_the_ation_sender(tmp_path):
+    path = write_devices(tmp_path, ATION_RELOAD)
+    runner, _ = mixed_runner([ation_credential("WB-1")], devices_file=str(path))
+    runner.start()
+    with requests_mock.Mocker() as mock:
+        ok_mock(mock)
+        runner.tick(TS, 0.0)
+    path.write_text(MQTT_RELOAD, encoding="utf-8")
+
+    result = runner.reload_inventory()
+
+    assert result.transport_changed == ("WB-1",)
+    assert runner.sessions["WB-1"].ation is None
+
+
+def test_newly_injected_ation_device_is_not_eagerly_connected(tmp_path):
+    path = write_devices(tmp_path, ATION_RELOAD)
+    runner, connector = mixed_runner([credential("AQ-1")], devices_file=str(path))
+    runner.start()
+    connector.calls.clear()
+
+    result = runner.reload_inventory()
+
+    assert result.added == ("WB-1",)
+    assert connector.calls == []            # 붙을 커넥션이 없다

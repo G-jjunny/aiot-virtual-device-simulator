@@ -21,6 +21,7 @@ from typing import Callable, Sequence
 
 from livesim import control
 from livesim.api import ApiError, exchange_device_token
+from livesim.ation import AtionDevice
 from livesim.config import (
     ALERT_BURST,
     DROPOUT,
@@ -35,7 +36,7 @@ from livesim.config import (
 from livesim.device import LiveDevice, MqttPublisher, Publisher
 from livesim.payload import DEFAULT_QUALITY
 from livesim.profiles import DEFAULT_PROFILE
-from livesim.scheduler import EventScheduler
+from livesim.scheduler import ActiveEvent, EventScheduler
 
 LOG = logging.getLogger("livesim.runner")
 
@@ -97,6 +98,7 @@ class ReloadResult:
     secret_changed: tuple[str, ...] = ()
     profile_changed: tuple[str, ...] = ()
     quality_changed: tuple[str, ...] = ()
+    transport_changed: tuple[str, ...] = ()
     error: str = ""
 
 
@@ -111,6 +113,12 @@ class DeviceSession:
 
     credential: DeviceCredential
     device: LiveDevice | None = None
+    ation: AtionDevice | None = None
+    """ation_http 경로의 송신기. MQTT의 device와 동시에 존재하지 않는다.
+
+    커넥션이 없어 수명 관리도 없지만, 통계 창(직전 전송 시각)을 들고 있어야
+    해서 틱을 넘어 살아남는다.
+    """
     connected: bool = False
     next_attempt: float = 0.0
     backoff: float = 0.0
@@ -130,6 +138,7 @@ class Runner:
         clock: Callable[[], float] = time.time,
         control_dir: str | None = None,
         devices_file: str | None = None,
+        api_base_url: str = "",
     ) -> None:
         self.scenario = scenario
         self.inventory = tuple(inventory)
@@ -137,6 +146,8 @@ class Runner:
         self.clock = clock
         self.control_dir = control_dir
         self.devices_file = devices_file
+        self.api_base_url = api_base_url
+        """ation_http 경로의 수집 엔드포인트 기준 주소. MQTT 기기만 있으면 쓰이지 않는다."""
         self.scheduler = EventScheduler(
             scenario.events, scenario.interval_seconds, rng=rng
         )
@@ -186,6 +197,8 @@ class Runner:
         session.profile = preset
         if session.device is not None:
             session.device.profile = preset
+        if session.ation is not None:
+            session.ation.profile = preset
         return preset
 
     def effective_quality(self, credential: DeviceCredential) -> str:
@@ -279,6 +292,8 @@ class Runner:
                 event.device_id,
                 (event.ends_at - now) / 60.0,
             )
+            if event.type == DROPOUT:
+                self._note_dropout_degraded(event.device_id)
 
         for index, device_id in enumerate(self.order):
             session = self.sessions[device_id]
@@ -295,6 +310,14 @@ class Runner:
             if event is not None and event.type == SILENCE:
                 # 침묵은 버퍼링도 하지 않는다 — 데이터 유실 자체를 모의한다.
                 stats.silenced += 1
+                continue
+
+            if session.credential.uses_ation_http:
+                # 커넥션·백오프·재프로비저닝이 전부 없는 경로라 아래 MQTT
+                # 수명 관리를 통째로 건너뛴다.
+                self._tick_ation(
+                    session, ts, self.tick_index * 1000 + index, event, stats
+                )
                 continue
 
             offline = session.device is not None and not session.device.online
@@ -329,6 +352,52 @@ class Runner:
 
         self.tick_index += 1
         return stats
+
+    def _tick_ation(
+        self,
+        session: DeviceSession,
+        ts: datetime,
+        seed: int,
+        event: ActiveEvent | None,
+        stats: TickStats,
+    ) -> None:
+        """ation_http 기기의 한 틱. 접속 없이 HTTP POST 한 번이 전부다."""
+        if event is not None and event.type == DROPOUT:
+            # 이 경로에는 오프라인 버퍼도, 밀린 측정을 몰아 보낼 batch 규격도
+            # 없다. 버퍼링하는 시늉만 하면 "복구되면 메워진다"는 잘못된 기대를
+            # 만들므로, 침묵과 같게 다룬다 (격하 사실은 시작 시점에 로그로 알린다).
+            stats.silenced += 1
+            return
+
+        if session.ation is None:
+            session.ation = AtionDevice(
+                session.credential, self.api_base_url, profile=session.profile
+            )
+        overrides = event.overrides if event is not None else None
+        try:
+            session.ation.publish(ts, seed=seed, overrides=overrides)
+        except Exception as exc:
+            # MQTT 경로와 같은 철학 — 그 기기만 실패로 접고 나머지 발행을 막지
+            # 않는다. 재시도는 다음 틱이며 백오프를 두지 않는다: 여기서 실패는
+            # 대개 발신 IP·백엔드 상태 문제라 이 기기가 물러난다고 풀리지 않고,
+            # 물러나면 정작 풀린 순간을 늦게 알아챈다.
+            LOG.error("에이티온 전송 실패 (%s): %s", session.credential.device_id, exc)
+            stats.failed += 1
+            session.connected = False
+            return
+        stats.published += 1
+        session.connected = True
+
+    def _note_dropout_degraded(self, device_id: str) -> None:
+        """ation_http 기기의 dropout은 버퍼링 없는 발행 중단으로 격하된다."""
+        session = self.sessions.get(device_id)
+        if session is None or not session.credential.uses_ation_http:
+            return
+        LOG.info(
+            "dropout 격하: %s 는 ation_http 경로라 버퍼링·batch 재전송이 없습니다 "
+            "— 그 구간은 silence와 같이 그대로 유실됩니다.",
+            device_id,
+        )
 
     def shutdown(self) -> None:
         """끊기 실패가 다른 디바이스 정리를 막지 않게 한다."""
@@ -402,6 +471,7 @@ class Runner:
             if session.device is not None:
                 session.device.go_offline()
             LOG.info("[ctl] 통신 단절: %s (%s분)", command.device_id, command.minutes)
+            self._note_dropout_degraded(command.device_id)
         elif command.command == control.BURST:
             # 명령이 목표치를 실어 왔으면 그걸, 아니면 시나리오·내장 기본값을.
             # 항목 검증은 control.drain_commands가 이미 마쳤다.
@@ -442,6 +512,7 @@ class Runner:
         secret_changed: list[str] = []
         profile_changed: list[str] = []
         quality_changed: list[str] = []
+        transport_changed: list[str] = []
 
         for device_id in removed:
             session = self.sessions.pop(device_id)
@@ -464,8 +535,19 @@ class Runner:
             # 다음 재접속 때 새 값으로 토큰을 받게 자격증명만 바꿔 끼운다.
             previous = session.credential
             session.credential = credential
+            if previous.transport != credential.transport:
+                # 경로가 바뀌면 들고 있던 송신기가 통째로 무의미해진다. MQTT
+                # 커넥션을 남겨두면 아무도 쓰지 않는 세션이 브로커에 계속 붙어
+                # 있고, 반대 방향이면 옛 통계 창이 새 경로로 흘러든다.
+                self._disconnect(session)
+                session.device = None
+                session.ation = None
+                session.backoff = 0.0
+                session.next_attempt = 0.0
             if session.device is not None:
                 session.device.credential = credential
+            if session.ation is not None:
+                session.ation.credential = credential
             # 파일의 profile/quality가 바뀌었을 수 있다. 런타임 변경이 있으면
             # 그쪽이 이긴다 (두 sync 모두 우선순위를 다시 해석한다).
             self._sync_profile(session)
@@ -482,6 +564,8 @@ class Runner:
                 profile_changed.append(device_id)
             if previous.quality != credential.quality:
                 quality_changed.append(device_id)
+            if previous.transport != credential.transport:
+                transport_changed.append(device_id)
 
         self.order = sorted(self.sessions)
         for device_id in added:
@@ -490,9 +574,9 @@ class Runner:
         # 질문이고, 로그가 없으면 명령이 유실된 것과 구분되지 않는다.
         LOG.info(
             "인벤토리 리로드: 추가 %d, 제거 %d, 시크릿 변경 %d, 프로파일 변경 %d, "
-            "품질 변경 %d (총 %d대)",
+            "품질 변경 %d, 전송 방식 변경 %d (총 %d대)",
             len(added), len(removed), len(secret_changed), len(profile_changed),
-            len(quality_changed), len(self.order),
+            len(quality_changed), len(transport_changed), len(self.order),
         )
         return ReloadResult(
             ok=True,
@@ -501,6 +585,7 @@ class Runner:
             secret_changed=tuple(secret_changed),
             profile_changed=tuple(profile_changed),
             quality_changed=tuple(quality_changed),
+            transport_changed=tuple(transport_changed),
         )
 
     def _connect_new_device(self, device_id: str) -> None:
@@ -513,6 +598,8 @@ class Runner:
         같은 호출이 원래 틱에서 일어날 일을 앞당기는 것뿐이라 총 작업량도 같다.
         """
         session = self.sessions[device_id]
+        if session.credential.uses_ation_http:
+            return   # 접속 개념이 없다 — 다음 틱에 바로 전송한다
         described = self.scheduler.describe(device_id)
         if described and described[0] == POWER_OFF:
             return   # 꺼진 채로 등재한 기기는 붙이지 않는다
@@ -548,6 +635,16 @@ class Runner:
         if session is None:
             LOG.warning("품질 대상 없음: %s", command.device_id)
             return
+        if session.credential.uses_ation_http:
+            # 에이티온 규격에 품질 필드가 없고, 백엔드 매퍼가 이 경로의 행을
+            # 무조건 OK로 적재한다. 명령을 삼키고 조용히 두면 "걸었는데 아무
+            # 일도 안 일어난다"가 되므로 이유를 말하고 상태도 바꾸지 않는다.
+            LOG.warning(
+                "[ctl] 측정 품질 적용 불가: %s 는 ation_http 경로입니다 "
+                "(규격에 품질 필드가 없어 백엔드가 항상 OK로 적재합니다).",
+                command.device_id,
+            )
+            return
         self.quality_overrides[command.device_id] = command.quality
         self._sync_quality(session)
         LOG.info("[ctl] 측정 품질 %s → %s", command.device_id, command.quality)
@@ -568,17 +665,31 @@ class Runner:
             described = self.scheduler.describe(device_id)
             event_type, ends_at, manual = described or (None, None, False)
             finite = ends_at is not None and ends_at != float("inf")
+            ation = session.credential.uses_ation_http
             devices.append({
                 "device_id": device_id,
                 # 패널이 인벤토리와 조인하지 않고 상태만으로 유형별 필터를
                 # 그릴 수 있게 한다 (두 응답의 타이밍이 어긋나면 조인이 샌다).
                 "device_type": session.credential.device_type,
+                # 읽는 쪽(패널·ctl status)이 커넥션 관련 칸을 어떻게 해석할지
+                # 결정하는 축이다. 이게 없으면 커넥션이 없는 기기가 '미접속'으로
+                # 보인다.
+                "transport": session.credential.transport,
                 "site_id": session.credential.site_id,
                 "profile": session.profile,
-                "quality": session.quality,
+                # ation_http에는 품질 축 자체가 없다 (백엔드가 항상 OK로 적재).
+                # 값을 적으면 걸지도 않은 품질이 걸린 것처럼 보인다.
+                "quality": None if ation else session.quality,
+                # ation의 connected는 '직전 전송 성공' — 붙어 있는 커넥션이
+                # 아니라 이 경로로 데이터가 실제로 들어가고 있는지를 뜻한다.
                 "connected": session.connected,
-                "online": session.device.online if session.device else False,
-                "pending": session.device.pending if session.device else 0,
+                # 오프라인 버퍼가 없는 경로라 '밀린 것'이라는 상태가 없다.
+                "online": True if ation else (
+                    session.device.online if session.device else False
+                ),
+                "pending": 0 if ation else (
+                    session.device.pending if session.device else 0
+                ),
                 "event": event_type,
                 "event_manual": manual,
                 # 기록 순간의 잔여 시간. 이 파일은 틱마다(기본 5분) 갱신되므로
@@ -750,6 +861,7 @@ def run(
         make_connector(settings),
         control_dir=settings.control_dir,
         devices_file=settings.devices_file,
+        api_base_url=settings.api_base_url,
     ).run(stop)
 
 

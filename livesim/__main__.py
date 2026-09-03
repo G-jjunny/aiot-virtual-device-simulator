@@ -115,8 +115,19 @@ def print_plan(scenario: Scenario, path: Path, settings, inventory) -> None:
                 )
                 line += f"\n    오버라이드: {targets} (±10% 노이즈, 센서 범위로 클램프)"
             print(line)
+    ation = [item for item in selected if item.uses_ation_http]
+    if ation:
+        # 이 경로는 MQTT 주소·시크릿을 전혀 쓰지 않는다. 대수를 먼저 보여줘야
+        # "브로커가 안 떠 있는데 왜 이 기기들은 준비 완료지"를 묻지 않는다.
+        print(
+            f"전송 방식: MQTT {len(selected) - len(ation)}대 · "
+            f"ation_http {len(ation)}대 (HTTP 수집 — 시크릿·MQTT 불필요)"
+        )
     for item in selected[:5]:
-        print(f"  · {item.device_id}  {item.device_type}/{item.facility_type}")
+        transport = "" if not item.uses_ation_http else "  [ation_http]"
+        print(
+            f"  · {item.device_id}  {item.device_type}/{item.facility_type}{transport}"
+        )
     if len(selected) > 5:
         print(f"  · ... 외 {len(selected) - 5}대")
     print("시나리오·인벤토리 검증 통과.")
@@ -213,7 +224,8 @@ def _print_status(control_dir: str) -> int:
         print(
             f"{item.get('device_id', '?'):<22} "
             f"{control.abbreviate_type(item.get('device_type')):<6} "
-            f"{'yes' if item.get('connected') else 'no':<6} "
+            # ation_http는 커넥션이 없어 yes/no가 뜻을 갖지 않는다 (§전송 방식).
+            f"{control.format_connection(item):<6} "
             f"{'yes' if item.get('online') else 'no':<7} "
             # 구버전 러너가 쓴 state.json에는 quality가 없다.
             f"{item.get('quality') or '-':<8} "

@@ -138,3 +138,53 @@ def test_forged_jwt_case_uses_a_registered_device_id():
     run(probe=recording_probe)
 
     assert seen == ["AQ-01"]
+
+
+# ---- 전송 방식 -----------------------------------------------------------
+
+
+ATION_DEVICE = DeviceCredential(
+    device_id="WB-ATION-1",
+    secret="",
+    site_id="S-1",
+    device_type="WEARABLE",
+    facility_type="OFFICE",
+    transport="ation_http",
+)
+
+
+def test_secret_case_skips_ation_devices():
+    """ation_http 기기를 고르면 SEC-02가 사실상 SEC-01이 되어 아무것도 검증하지 않는다."""
+    submitted: list[str] = []
+
+    def recording_exchange(base_url, device_id, secret):
+        submitted.append(device_id)
+        raise ApiError("거부 (401)", status=401)
+
+    results = by_id(
+        run(inventory=(ATION_DEVICE,) + INVENTORY, exchange=recording_exchange)
+    )
+
+    assert results["SEC-02"].passed is True
+    assert "AQ-01" in submitted
+    assert "WB-ATION-1" not in submitted
+
+
+def test_forged_jwt_case_skips_ation_devices():
+    seen: list[str] = []
+
+    def recording_probe(host, port, username, password):
+        seen.append(username)
+        return REJECTED
+
+    run(inventory=(ATION_DEVICE,) + INVENTORY, probe=recording_probe)
+
+    assert seen == ["AQ-01"]
+
+
+def test_ation_only_inventory_reports_why_the_secret_case_cannot_run():
+    """PASS로 넘기면 secret 검증을 한 적이 없는데 통과한 것으로 읽힌다."""
+    results = by_id(run(inventory=(ATION_DEVICE,)))
+
+    assert results["SEC-02"].passed is False
+    assert "ation_http" in results["SEC-02"].detail
