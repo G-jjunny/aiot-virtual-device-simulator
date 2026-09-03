@@ -26,6 +26,19 @@ MQTT_PROBE_TIMEOUT = 10.0
 UNKNOWN_DEVICE_PREFIX = "LIVESIM-NOPE-"
 
 
+def mqtt_subject(inventory: Sequence[DeviceCredential]) -> DeviceCredential | None:
+    """SEC-02·03이 대상으로 삼을 기기. **MQTT 경로의 기기여야 한다.**
+
+    ation_http 기기는 secret도 MQTT 신원도 없어서, 그걸 고르면 SEC-02가 "등록된
+    기기의 secret 검증"이 아니라 사실상 SEC-01(미등록)을 한 번 더 하는 것이 된다.
+    거부되니 PASS는 뜨지만 검증한 것이 없다 — 리허설이 조용히 아무것도 안 하게 된다.
+    """
+    for item in inventory:
+        if not item.uses_ation_http:
+            return item
+    return None
+
+
 @dataclass(frozen=True)
 class CaseResult:
     case_id: str
@@ -131,7 +144,14 @@ def _case_wrong_secret(
             "SEC-02", "등록된 device_id + 틀린 secret", False,
             "인벤토리가 비어 있어 검사할 수 없습니다",
         )
-    device_id = inventory[0].device_id
+    subject = mqtt_subject(inventory)
+    if subject is None:
+        return CaseResult(
+            "SEC-02", "등록된 device_id + 틀린 secret", False,
+            "MQTT 경로의 기기가 인벤토리에 없어 검사할 수 없습니다 "
+            "(ation_http 기기는 secret을 쓰지 않습니다)",
+        )
+    device_id = subject.device_id
     try:
         exchange(settings.api_base_url, device_id, f"wrong-{secrets.token_urlsafe(16)}")
     except ApiError as exc:
@@ -153,7 +173,8 @@ def _case_wrong_secret(
 def _case_forged_jwt(
     settings: Settings, inventory: Sequence[DeviceCredential], probe: MqttProbe
 ) -> CaseResult:
-    device_id = inventory[0].device_id if inventory else "LIVESIM-PROBE"
+    subject = mqtt_subject(inventory)
+    device_id = subject.device_id if subject is not None else "LIVESIM-PROBE"
     result = probe(
         settings.mqtt_host, settings.mqtt_port, device_id, secrets.token_urlsafe(32)
     )

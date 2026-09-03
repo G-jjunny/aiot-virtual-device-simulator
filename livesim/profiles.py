@@ -69,12 +69,20 @@ DEVICE_FIELDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def unit_hash(key: str) -> float:
+    """문자열 키 하나로 정해지는 [0, 1) 결정적 유사 난수.
+
+    난수 생성기를 쓰지 않는 이유: 같은 입력이면 언제·어느 프로세스에서 계산해도
+    같은 값이 나와야 파형이 재현되고 테스트가 결정적이다. 기기별 위상·기준 좌표처럼
+    "이 기기는 원래 이런 값"을 정하는 데도 같은 함수를 쓴다.
+    """
+    digest = hashlib.sha256(key.encode()).digest()
+    return int.from_bytes(digest[:8], "big") / float(1 << 64)  # [0, 1)
+
+
 def _unit_noise(name: str, ts: datetime, seed: int) -> float:
     """[-1, 1] 범위의 결정적 유사 난수."""
-    key = f"{name}|{ts.isoformat()}|{seed}".encode()
-    digest = hashlib.sha256(key).digest()
-    raw = int.from_bytes(digest[:8], "big") / float(1 << 64)  # [0, 1)
-    return raw * 2.0 - 1.0
+    return unit_hash(f"{name}|{ts.isoformat()}|{seed}") * 2.0 - 1.0
 
 
 GOOD = "good"
@@ -302,6 +310,21 @@ def profile_for(
     return replace(profile, base=base, amplitude=amplitude)
 
 
+def evaluate(profile: Profile, name: str, ts: datetime, seed: int = 0) -> float:
+    """Profile 하나를 일주기 코사인 + 결정적 노이즈로 평가한다.
+
+    `SENSOR_PROFILES`에 등재되지 않은 파형(예: 에이티온 경로의 혈압)도 같은
+    파형 규칙을 쓰게 하려고 분리했다. 등재 표는 백엔드 업로드 DTO의 범위·자릿수
+    계약이라, 그쪽 경로에 실리지 않는 지표를 끼워 넣으면 계약이 흐려진다.
+    """
+    hours = ts.hour + ts.minute / 60.0
+    phase = 2.0 * math.pi * (hours - profile.peak_hour) / 24.0
+    value = profile.base + profile.amplitude * math.cos(phase)
+    value += profile.noise * _unit_noise(name, ts, seed)
+    value = max(profile.minimum, min(profile.maximum, value))
+    return round(value, profile.decimals)
+
+
 def sensor_value(
     name: str,
     ts: datetime,
@@ -309,13 +332,7 @@ def sensor_value(
     preset: str = DEFAULT_PROFILE,
     facility_type: str | None = None,
 ) -> float:
-    profile = profile_for(name, preset, facility_type)
-    hours = ts.hour + ts.minute / 60.0
-    phase = 2.0 * math.pi * (hours - profile.peak_hour) / 24.0
-    value = profile.base + profile.amplitude * math.cos(phase)
-    value += profile.noise * _unit_noise(name, ts, seed)
-    value = max(profile.minimum, min(profile.maximum, value))
-    return round(value, profile.decimals)
+    return evaluate(profile_for(name, preset, facility_type), name, ts, seed)
 
 
 def reading(

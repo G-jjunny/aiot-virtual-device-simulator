@@ -29,6 +29,9 @@ DB에 붙지 않고, 관리자 계정도 쓰지 않습니다. **실제 디바이
                             EMQX ──webhook──▶ aiot-api ──▶ TimescaleDB
 ```
 
+위 그림은 **우리가 만든 측정기**(`transport: mqtt`, 기본값)의 경로입니다. 웨어러블은 실제로
+벤더(에이티온) 서버를 거쳐 HTTP로 들어오며, 그 경로는 [§2-B](#2-b-전송-방식--우리-브로커mqtt와-벤더-경유에이티온-http)에 있습니다.
+
 `devices.yaml`에 값을 옮겨 적는 행위가 실물 디바이스의 **"공장/설치 시 설정 주입"**에 해당합니다.
 디바이스는 자기 자격증명만 알 뿐, 관리자 계정도 다른 디바이스의 존재도 알지 못합니다.
 
@@ -70,7 +73,8 @@ paho는 두 지점에서 조용히 실패합니다: `connect()`는 CONNACK를 �
 | `livesim/config.py` | 환경변수 `Settings`, `devices.yaml` 인벤토리, 시나리오 YAML |
 | `livesim/api.py` | `POST /auth/device/token` 하나뿐 (secret → JWT 교환) |
 | `livesim/profiles.py` | 센서 파형 + 환경 프리셋 4종(시설별 밴드 보정 포함), IAQ 18종 + 생체 3종 |
-| `livesim/payload.py` | 페이로드/토픽 빌더, 오버라이드 클램프 |
+| `livesim/payload.py` | MQTT 페이로드/토픽 빌더, 오버라이드 클램프 |
+| `livesim/ation.py` | 에이티온 HTTP 수집 경로 — 13종 값 모델, 규격 페이로드, 송신 (§2-B) |
 | `livesim/device.py` | `LiveDevice` — 발행, 오프라인 버퍼링, batch 재전송, CONNACK 검증 |
 | `livesim/scheduler.py` | 이벤트 상태 머신 (확률 이벤트 + 수동 조작) |
 | `livesim/control.py` | 파일 기반 제어 채널 (`ctl`·패널 ↔ 러너) |
@@ -103,6 +107,9 @@ devices:
     device_type: FIXED # FIXED | PORTABLE | WEARABLE
     facility_type: OFFICE # OFFICE|SCHOOL|DAYCARE|WELFARE|HOME|HOME_ELDERLY
 ```
+
+> 웨어러블을 실제 규격(벤더 HTTP 13종)으로 보내려면 `transport: ation_http`를 적으세요 —
+> [§2-B](#2-b-전송-방식--우리-브로커mqtt와-벤더-경유에이티온-http). 적지 않으면 지금까지처럼 MQTT로 발행합니다.
 
 > `devices.yaml`은 시크릿 평문을 담으므로 `.gitignore`에 등록되어 있습니다. **절대 커밋하지 마세요.**
 > 커밋용 예시는 `devices.example.yaml`입니다.
@@ -174,6 +181,169 @@ python -m livesim scenarios/daily-ops.yaml             # 발행 시작
 | `CONTROL_DIR` | `control` | `ctl` 명령/상태 교환 디렉터리 |
 
 **필수 항목이 없습니다.** 관리자 계정을 요구하지 않는 것이 0.2.0의 핵심입니다.
+
+---
+
+## 2-B. 전송 방식 — 우리 브로커(MQTT)와 벤더 경유(에이티온 HTTP)
+
+지금까지 livesim의 기기는 전부 **우리가 만든 측정기**였습니다. 자기 시크릿으로 토큰을 받아 우리
+EMQX에 붙고, 우리가 정한 토픽으로 발행합니다.
+
+**웨어러블은 다릅니다.** 실제 착용형 기기는 우리 브로커에 붙지 않습니다. 단말이 벤더(에이티온)
+서버로 보내고, **그 서버가 우리 백엔드로 HTTP push**합니다. 경로도 필드도 인증도 전혀 다릅니다.
+
+0.6까지 livesim의 웨어러블은 MQTT로 심박·SpO2·체온 **3종만** 발행했습니다. 실제 규격은 13종이니
+실물과 다른 경로로 23%만 채우는 반쪽 모의였습니다. 0.7.0의 `transport: ation_http`가 이 간극을
+메웁니다.
+
+```
+[mqtt]        측정기 ──토큰 교환──▶ aiot-api
+                    └──MQTT PUBLISH──▶ EMQX ──webhook──▶ aiot-api ──▶ TimescaleDB
+
+[ation_http]  웨어러블 ─(실물: 벤더 앱/서버)─▶ 에이티온 서버
+                    └──POST /v1/biometric/ingest──▶ aiot-api ──▶ TimescaleDB
+                       (livesim은 이 마지막 화살표를 흉내냅니다)
+```
+
+|  | `mqtt` (기본) | `ation_http` |
+| --- | --- | --- |
+| 무엇을 모의하나 | 우리가 만든 측정기 | 벤더 서버가 대신 보내주는 웨어러블 |
+| 경로 | EMQX `aiot/v1/…/sensor` | `POST {API_BASE_URL}/v1/biometric/ingest` |
+| 인증 | `secret` → 디바이스 JWT → MQTT CONNECT | **없음** (발신 IP 화이트리스트) |
+| `secret` 필요 | **필수** | **불필요** (적어도 되지만 쓰이지 않음) |
+| 필드 네이밍 | snake_case (`device_id`) | 벤더 원안 그대로 (`PPG_HR`, `ENV TEMPERATURE`) |
+| 측정 항목 | 디바이스 타입별 IAQ 18종 / 생체 3종 | 생체·환경·활동 13종 |
+| `profile`(환경 등급) | 적용 | **적용** |
+| `quality`(측정 품질) | 적용 | **적용 안 됨** (아래 참고) |
+| `dropout` | 버퍼링 → 복구 시 batch 재전송 | **발행 중단으로 격하** (아래 참고) |
+| `off` / `on` | 동작 | 동작 |
+| 커넥션 상태 | 접속·백오프·재프로비저닝 | 없음 (`CONN` 칸이 `http`) |
+
+### 인벤토리에 적기
+
+```yaml
+- device_id: WB-ATION-01
+  site_id: "660e8400-e29b-41d4-a716-446655441111"
+  device_type: WEARABLE
+  facility_type: OFFICE
+  transport: ation_http # 생략하면 mqtt
+  # secret 없음 — 이 경로는 자격증명을 쓰지 않습니다
+  latitude: 37.46269 # 선택. 없으면 서울 도심을 중심으로 흩뿌립니다
+  longitude: 127.05203
+```
+
+**`device_type`으로 추론하지 않습니다.** `WEARABLE`이어도 `transport`를 적지 않으면 지금까지처럼
+MQTT로 발행합니다. 전송 방식은 그 기기를 **누가 운영하느냐**의 문제이지 기기 종류의 문제가
+아니고, 추론으로 정하면 기존 웨어러블 항목의 동작이 파일을 고치지도 않았는데 조용히 바뀝니다.
+
+`ctl reload`로 경로를 바꿀 수 있습니다. 리로드 로그는 변경을 **종류별로** 세므로
+(`전송 방식 변경 1`), 경로가 바뀐 것을 시크릿 회전으로 오해하지 않습니다. 경로가 바뀌면 들고
+있던 MQTT 커넥션(또는 통계 창)은 버려집니다.
+
+### 왜 인증이 없는가
+
+백엔드 v0.1.11이 이 경로의 `X-API-KEY`를 **걷어내고 발신 서버 IP 화이트리스트**로 바꿨습니다
+(`AtionIpWhitelistFilter`). 상대는 어떤 헤더도 붙이지 않으므로 livesim도 붙이지 않습니다 —
+붙이면 실물과 다른 것을 시험하게 됩니다.
+
+허용 목록 밖에서 부르면 **403**입니다. 재시도해도 같은 답이 오므로 로그가 원인을 못 박습니다.
+
+```
+ERROR 에이티온 전송 실패 (WB-ATION-01): 에이티온 수집 거부 (WB-ATION-01, 403):
+      발신 IP가 백엔드의 ATION_ALLOWED_IPS 화이트리스트에 없습니다 …
+```
+
+### 필드 13종의 값 모델
+
+`MESSAGE_ID`(매 전송 새 UUID) · `DEVICE_ID` · `PHONE_NUMBER`(규격대로 `"nothing"`, 백엔드가
+저장하지 않음) · `FW_VER`는 고정값이고, 아래 13종이 실제로 움직이는 값입니다.
+
+| 필드 | 값 모델 |
+| --- | --- |
+| `PPG_HR` | `heart_rate` 프로필 재사용 (일주기 + 결정적 노이즈) |
+| `PPG_SPO2` | `spo2` 프로필 재사용, **정수 반올림** (규격 예시가 정수) |
+| `TEMPERATURE` | `skin_temp` 프로필 재사용, 소수 2자리 (컬럼이 `NUMERIC(5,2)`) |
+| `BP_SYS` · `BP_DIA` | 전용 파형 — 수축기 118±10, 이완기 76±7 (피크 16시). **항상 수축기 > 이완기**이고 맥압 25 이상을 강제합니다 |
+| `IMU_STEP_CNT` | 그날 **누적 카운터**. 자정 0으로 리셋, 07~22시에 증가, 야간은 거의 정지. 하루 총합 3000~12000 (기기·날짜 해시로 결정) |
+| `SLEEP_DURATION` | 분 단위. 23~07시에 누적 증가하고, 주간에는 **그 밤의 총량을 유지**합니다 (330~480분) |
+| `WAKEUP_DURATION` | 수면 중 각성 시간 — 수면의 3~8% |
+| `ENV TEMPERATURE` · `ENV HUMIDITY` | `temp`/`humi` 프로필 재사용 (웨어러블 주변 환경) |
+| `battery_percent` | 100에서 96시간에 걸쳐 20까지 줄고 100으로 복귀(충전 모사). 기기별 위상이 달라 플릿이 동시에 방전되지 않습니다 |
+| `positioning` | 인벤토리 좌표(없으면 서울 도심 ± `device_id` 해시)에 매 전송 ±0.0003도 흔들림. `accuracy_h` 10~50, `altitude`·`floor`는 0 |
+| `statistics` | 이번 전송 창(직전 전송 ~ 지금)의 `PPG_HR` 통계 1건. 창을 60초 간격으로 샘플링해 count/average/min/max를 냅니다 |
+
+> **공백이 든 키.** `"ENV TEMPERATURE"`·`"ENV HUMIDITY"`는 벤더 규격서 원안 그대로입니다.
+> 우리 관례(`env_temperature`)로 고치면 백엔드가 그 값을 읽지 못합니다 — 백엔드 DTO의
+> `@JsonProperty`가 원안 키에 붙어 있기 때문입니다.
+
+**프로파일은 그대로 적용됩니다.** `bad` 이상이면 오염 환경의 생리 반응(심박↑·SpO2↓)이 이 경로에도
+실립니다. `ctl burst --set heart_rate=170`처럼 파형 항목의 목표치도 동작합니다(걸음·수면·배터리·
+위치는 파형이 아니라 누적·상태 모델이라 목표치 대상이 아닙니다).
+
+### ⚠ `MEASURED_AT`의 시간 기준이 MQTT 경로와 다릅니다
+
+규격이 요구하는 형식이 **epoch 밀리초**라 livesim은 그 시점을 정직하게 보냅니다. 그런데 백엔드는
+이 값을 `EpochMillis`로 **UTC 기준** `LocalDateTime`에 넣습니다.
+
+| 경로 | 보내는 것 | DB `captured_at`에 적히는 값 |
+| --- | --- | --- |
+| `mqtt` | naive KST 문자열 `2026-08-13T14:30:00` | `14:30` (KST 벽시계 숫자, [§7](#7-captured_at을-naive-kst로-보내는-이유)) |
+| `ation_http` | epoch ms (그 시점) | `05:30` (UTC 벽시계) |
+
+즉 **같은 순간에 보낸 두 경로의 `captured_at`이 9시간 어긋납니다.** 차트를 나란히 볼 때 이 점을
+감안하세요.
+
+**그래도 보정하지 않습니다.** 임의로 9시간을 더하면 규격을 어기는 값이 되고, 백엔드가 기준을
+고치는 날 두 번 틀립니다. 실물 송신측도 이 값을 보정하지 않으므로, 보정하는 순간 시뮬레이터가
+실물보다 관대해집니다. 차이는 문서로 남기고 값은 그대로 보냅니다.
+
+### ⚠ `quality`(측정 품질)가 적용되지 않습니다
+
+에이티온 규격에는 품질 필드가 **없습니다.** 백엔드 매퍼(`AtionIngestRequestMapper`)가 이 경로로
+들어온 행을 무조건 `QualityFlag.OK`로 적재합니다. 규격에 없는 키를 지어내 보내도 백엔드가 버리므로
+아무 효과가 없습니다.
+
+그래서 `ation_http` 기기는:
+
+- 패널 카드의 품질 셀렉트가 **비활성**입니다(이유를 툴팁으로 설명합니다).
+- `ctl quality`를 걸면 거부하고 이유를 로그에 남깁니다 — 조용히 삼키면 "걸었는데 아무 일도 안
+  일어난다"가 됩니다.
+- `state.json`·`ctl status`의 `QUAL` 칸이 `-`입니다. 걸지도 않은 품질이 걸린 것처럼 보이지 않게.
+
+품질 축을 시험하려면 MQTT 경로의 기기를 쓰세요.
+
+### ⚠ `dropout`이 발행 중단으로 격하됩니다
+
+`dropout`은 "끊긴 동안 버퍼에 쌓았다가 복구되면 batch로 몰아 보낸다"인데, 이 규격에는 **밀린
+측정을 몰아 보내는 배열 형태가 없습니다.** 그래서 `ation_http` 기기의 `dropout`은 `silence`와 같이
+**그냥 발행 중단**이고, 그 구간은 그대로 유실됩니다. 격하 사실은 이벤트 시작 시점에 로그로
+알립니다.
+
+```
+INFO dropout 격하: WB-ATION-01 는 ation_http 경로라 버퍼링·batch 재전송이 없습니다
+     — 그 구간은 silence와 같이 그대로 유실됩니다.
+```
+
+`off`/`on`은 그대로 동작합니다(발행 중단/재개).
+
+### 화면에서 어떻게 보이나
+
+- **패널**: 카드에 `HTTP` 배지가 붙습니다. 기본값인 MQTT는 무표시입니다 — 프리셋 `good`·품질 `OK`와
+  같은 원칙으로, 29장 전부에 배지가 붙으면 정작 다른 기기가 묻힙니다.
+- **`ctl status`**: `CONN` 칸이 `yes`/`no` 대신 `http`(직전 전송 성공) 또는 `http!`(직전 전송 실패
+  또는 아직 첫 전송 전)입니다. 붙일 커넥션이 없는 기기에 `no`를 쓰면 "안 붙었다"로 오독됩니다.
+
+```
+DEVICE                 TYPE   CONN   ONLINE  QUAL      PEND  EVENT
+------------------------------------------------------------------
+AQ-GANGNAM-01          FIXED  yes    yes     OK           0  -
+WB-ATION-01            WEAR   http   yes     -            0  -
+WB-ATION-02            WEAR   http!  yes     -            0  -
+```
+
+전송 실패는 그 기기만 실패로 접고 나머지 발행을 막지 않습니다(MQTT 경로와 같은 철학). 다만
+**백오프를 두지 않고 다음 틱에 바로 재시도**합니다 — 이 경로의 실패는 대개 발신 IP나 백엔드 상태
+문제라 그 기기가 물러난다고 풀리지 않고, 물러나면 정작 풀린 순간을 늦게 알아채기 때문입니다.
 
 ---
 
@@ -256,7 +426,8 @@ AQ-GANGNAM-02          FIXED  yes    no      DRIFT        3  dropout (수동) 02
 WB-GANGNAM-01          WEAR   yes    yes     ERROR        0  -
 ```
 
-`TYPE`은 `FIXED`/`PORT`/`WEAR` 축약, `QUAL`은 측정 품질 플래그(§4-B — 구버전 러너가 쓴
+`CONN`은 MQTT 기기의 접속 여부(`yes`/`no`)이고, `ation_http` 기기는 커넥션이 없어
+`http`/`http!`로 나옵니다(§2-B). `TYPE`은 `FIXED`/`PORT`/`WEAR` 축약, `QUAL`은 측정 품질 플래그(§4-B — 구버전 러너가 쓴
 `state.json`에는 없어서 `-`로 나옵니다)이고, 남은시간은 **출력하는 시점 기준으로 다시 계산**됩니다
 (`state.json`에 적힌 값은 마지막 틱 시점이라 최대 한 틱만큼 낡았습니다).
 
@@ -315,7 +486,7 @@ python -m livesim panel --port 9000
 | 사이트 바 | 사이트 선택(`site_id` 앞 8자 + 대수) · 선택 시 **[이 사이트 전체 적용]** 일괄 변경 |
 | 디바이스 카드 | 좌측 색 띠 — 초록=정상, 회색=전원 off, 주황=단절/오프라인, 빨강=비활성 |
 | 카드 본문 | device_id · 유형/시설 · `site 550e8400…` |
-| 카드 배지 | 진행 중 이벤트(수동 여부 포함), 버퍼 건수, 남은 시간(mm:ss, 매초 감소), **환경 등급**(good은 무표시·moderate 노랑·bad 주황·very_bad 빨강) |
+| 카드 배지 | **전송 방식**(`ation_http`만 `HTTP` 배지, MQTT는 무표시 — §2-B), 진행 중 이벤트(수동 여부 포함), 버퍼 건수, 남은 시간(mm:ss, 매초 감소), **환경 등급**(good은 무표시·moderate 노랑·bad 주황·very_bad 빨강) |
 | 카드 버튼 | 전원 on/off · 단절… · 버스트… (`…`는 카드 안에서 설정 폼이 펼쳐집니다) · 환경 등급 셀렉트 |
 | 우측 폼 | 새 기기 주입 (시크릿은 password 입력, 전원 off로 주입 체크박스) |
 
@@ -620,6 +791,11 @@ livesim rehearse
 실제 secret은 어떤 케이스에서도 전송하지 않습니다. 5xx나 네트워크 오류는 "막혔다"는 증거가
 아니므로 PASS로 세지 않고 "확인 불가"로 실패 처리합니다.
 
+SEC-02·SEC-03은 인벤토리에서 **MQTT 경로의 기기**를 골라 시도합니다. `ation_http` 기기는 secret도
+MQTT 신원도 없어서(§2-B), 그걸 고르면 SEC-02가 사실상 SEC-01을 한 번 더 하는 것이 되어 거부는
+되지만 정작 secret 검증을 확인하지 못합니다. 인벤토리가 전부 `ation_http`이면 SEC-02는 그 이유를
+밝히며 실패로 보고합니다 — 검증하지 않은 것을 PASS로 넘기지 않습니다.
+
 ---
 
 ## 6. Docker로 24시간 운영
@@ -711,6 +887,10 @@ MQTT_HOST=host.docker.internal
 `captured_at`으로는 그 행을 다시 찾을 수 없습니다. **백엔드 결함에 대한 우회이며, 백엔드가
 고쳐지면 이 동작도 함께 바꿔야 합니다.**
 
+> 이것은 **MQTT 경로**의 이야기입니다. `ation_http` 경로는 규격이 epoch 밀리초를 요구하고
+> 백엔드가 그 값을 UTC 기준으로 적재하므로, 같은 순간이라도 `captured_at`이 9시간
+> 어긋납니다 — [§2-B](#-measured_at의-시간-기준이-mqtt-경로와-다릅니다) 참고.
+
 ---
 
 ## 8. 운영 런북 — 토큰 폐기(revoke) 대응
@@ -759,6 +939,9 @@ livesim 토픽만이 아니라 EMQX 웹훅 설정도 함께 의심하세요.
 | 배치 토픽 `{"readings": [...]}` | `device.LiveDevice.go_online` | dropout 재전송분만 유실 |
 | clientid 기준 ban (§1·§8) | `runner.make_connector` | 접두어를 붙이면 폐기가 안 먹힘 |
 | 시설별 등급 밴드 스냅샷 (§4-B) | `profiles.FACILITY_GRADE_BANDS` | 프리셋과 FE 등급 배지가 어긋남(적재는 정상) |
+| 에이티온 규격 필드명·구조 (§2-B) | `ation.build_payload` | 422 또는 값 누락 — 정본은 백엔드의 `ation/golden-request.json` |
+| `POST /v1/biometric/ingest` 인증 없음 | `ation.send` | 403 (발신 IP 화이트리스트 밖) |
+| `MEASURED_AT` = epoch ms, UTC 적재 | `ation.epoch_millis` | 적재 시각이 의도와 다른 축에 놓임 |
 
 `SENSOR_PROFILES`의 `minimum`/`maximum`은 업로드 DTO의 `@DecimalMin`/`@DecimalMax` 안에,
 `decimals`는 DB 컬럼의 `NUMERIC(x,y)`에 맞춰져 있습니다.
@@ -825,4 +1008,5 @@ pytest
 | **0.4** | **환경 프로파일 시스템** — 프리셋 4종, 3계층 우선순위, 사이트 필터·일괄 변경, 프로파일 배지 |
 | 0.4.x | CONNACK·PUBACK 검증(허위 양성 제거), clientid=device_id 정렬, 리렌더 포커스 가드 일반화 |
 | **0.5** | **시설 인지형 프리셋** — 프리셋 = 그 시설의 법정 밴드 기준 등급. 백엔드 `metric_grade_band` 스냅샷 하드코딩, 시설별 보정표, 최악 케이스 등급 보장 테스트 (§4-B) |
+| **0.7** | **에이티온 HTTP 송신 모드** — 인벤토리 `transport: ation_http`, 규격 13종 값 모델(혈압·걸음·수면·배터리·측위·통계), 인증 없는 `POST /v1/biometric/ingest`, 패널 `HTTP` 배지·`ctl status` `CONN=http` (§2-B) |
 | **0.6** | **측정 품질 플래그** — `quality` 3계층(런타임 > 파일 > `OK`), `ctl quality`·패널 배지/셀렉트, `state.json`·`ctl status` 노출. 리로드 로그를 변경 종류별(시크릿/프로파일/품질)로 분리 |

@@ -510,3 +510,124 @@ def test_profile_and_quality_coexist_on_one_device(tmp_path):
 
     assert inventory[0].profile == "bad"
     assert inventory[0].quality == "DRIFT"
+
+
+# ---- 전송 방식 (transport) ---------------------------------------------
+
+
+ATION_ENTRY = """
+devices:
+  - device_id: WB-ATION-01
+    site_id: 550e8400-e29b-41d4-a716-446655440000
+    device_type: WEARABLE
+    facility_type: OFFICE
+    transport: ation_http
+"""
+
+
+def with_transport(value: str) -> str:
+    return VALID_INVENTORY.replace(
+        "    facility_type: OFFICE",
+        f"    facility_type: OFFICE\n    transport: {value}",
+        1,
+    )
+
+
+def test_transport_defaults_to_mqtt(tmp_path):
+    """적지 않은 기존 항목의 동작이 바뀌면 안 된다."""
+    inventory = load_inventory(write_inventory(tmp_path, VALID_INVENTORY))
+
+    assert [item.transport for item in inventory] == ["mqtt", "mqtt"]
+    assert not inventory[1].uses_ation_http
+
+
+def test_transport_is_parsed(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, with_transport("ation_http")))
+
+    assert inventory[0].transport == "ation_http"
+    assert inventory[0].uses_ation_http
+
+
+def test_rejects_unknown_transport(tmp_path):
+    with pytest.raises(InventoryError, match="transport"):
+        load_inventory(write_inventory(tmp_path, with_transport("carrier_pigeon")))
+
+
+def test_wearable_alone_does_not_imply_ation_http(tmp_path):
+    """device_type으로 경로를 추론하면 기존 웨어러블이 조용히 다른 곳으로 간다."""
+    inventory = load_inventory(write_inventory(tmp_path, VALID_INVENTORY))
+
+    assert inventory[1].device_type == "WEARABLE"
+    assert inventory[1].transport == "mqtt"
+
+
+def test_ation_http_does_not_require_a_secret(tmp_path):
+    """이 경로는 자격증명을 쓰지 않는다 — 없는 값을 지어내 적게 두지 않는다."""
+    inventory = load_inventory(write_inventory(tmp_path, ATION_ENTRY))
+
+    assert inventory[0].secret == ""
+    assert inventory[0].uses_ation_http
+
+
+def test_mqtt_still_requires_a_secret(tmp_path):
+    body = ATION_ENTRY.replace("    transport: ation_http\n", "")
+
+    with pytest.raises(InventoryError, match="secret"):
+        load_inventory(write_inventory(tmp_path, body))
+
+
+def test_ation_http_may_still_carry_a_secret(tmp_path):
+    """경로를 되돌릴 때를 대비해 남겨둔 시크릿까지 거부할 이유는 없다."""
+    body = ATION_ENTRY.replace(
+        "    device_type: WEARABLE",
+        "    secret: kept-for-later\n    device_type: WEARABLE",
+    )
+
+    inventory = load_inventory(write_inventory(tmp_path, body))
+
+    assert inventory[0].secret == "kept-for-later"
+
+
+def test_blank_secret_is_still_rejected_for_ation_http(tmp_path):
+    """적었다면 값이 있어야 한다 — 빈 문자열은 오타이지 '없음'의 표현이 아니다."""
+    body = ATION_ENTRY.replace(
+        "    device_type: WEARABLE", '    secret: ""\n    device_type: WEARABLE'
+    )
+
+    with pytest.raises(InventoryError, match="secret"):
+        load_inventory(write_inventory(tmp_path, body))
+
+
+def test_coordinates_are_optional_and_parsed(tmp_path):
+    body = ATION_ENTRY + "    latitude: 37.46269\n    longitude: 127.05203\n"
+
+    inventory = load_inventory(write_inventory(tmp_path, body))
+
+    assert inventory[0].latitude == 37.46269
+    assert inventory[0].longitude == 127.05203
+
+
+def test_coordinates_default_to_none(tmp_path):
+    inventory = load_inventory(write_inventory(tmp_path, ATION_ENTRY))
+
+    assert inventory[0].latitude is None
+    assert inventory[0].longitude is None
+
+
+@pytest.mark.parametrize(
+    "line", ["    latitude: 91\n", "    longitude: 181\n", "    latitude: north\n"]
+)
+def test_rejects_out_of_range_or_non_numeric_coordinates(tmp_path, line):
+    with pytest.raises(InventoryError, match="itude"):
+        load_inventory(write_inventory(tmp_path, ATION_ENTRY + line))
+
+
+def test_example_inventory_covers_ation_http(tmp_path):
+    """예시 파일이 새 경로를 보여주지 않으면 아무도 쓰는 법을 모른다."""
+    example = Path(__file__).resolve().parents[1] / "devices.example.yaml"
+
+    inventory = load_inventory(example)
+
+    ation = [item for item in inventory if item.uses_ation_http]
+    assert ation, "devices.example.yaml에 ation_http 예시가 없습니다"
+    assert all(item.secret == "" for item in ation)

@@ -59,6 +59,7 @@ def public_inventory(devices_file: str | Path) -> list[dict[str, str]]:
             "device_type": item.device_type,
             "facility_type": item.facility_type,
             "power": item.power,
+            "transport": item.transport,
         }
         for item in load_inventory(devices_file)
     ]
@@ -118,6 +119,10 @@ def append_device(devices_file: str | Path, entry: dict[str, Any]) -> str:
         # 기본값(on)은 적지 않는다 — 손으로 보는 파일에 기본값 줄이 늘어나면
         # 정작 꺼둔 기기가 눈에 띄지 않는다.
         entry_out["power"] = credential.power
+    if credential.uses_ation_http:
+        # 같은 이유로 기본값(mqtt)은 적지 않는다. 다만 이 값을 빠뜨리면 주입한
+        # 기기가 파일에서 조용히 mqtt가 되어, 리로드 순간 경로가 바뀐다.
+        entry_out["transport"] = credential.transport
 
     block = yaml.safe_dump(
         [entry_out],
@@ -429,6 +434,11 @@ border-radius:6px}
 .qual.drift{background:#2f2440;color:#c3a2ee;border-color:#4a3a63}
 .qual.error{background:#42151f;color:#ff8fa3;border-color:#6d2534}
 .qual.missing{background:#20262e;color:#9fb2c4;border-color:#38424e}
+/* 전송 방식은 '상태'가 아니라 '채널 라벨'이라 상태 배지(초록/주황/적)와 다른
+   계열(강조색)로 둔다. 기본값인 MQTT는 무표시 — 프리셋 good·품질 OK와 같은
+   원칙이다(29장 전부에 배지가 붙으면 정작 다른 기기가 묻힌다). */
+.badge.tx{background:#1b2540;color:#93aef0;border:1px solid #2f3d63;
+letter-spacing:.04em}
 .site{color:var(--dim);font-size:10px;margin-top:2px;font-family:ui-monospace,monospace}
 .sitebar{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:12px}
 .sitebar .lbl{color:var(--dim);font-size:11px}
@@ -610,6 +620,15 @@ function qualBadge(d){
   return '<span class="badge qual '+esc(q.toLowerCase())+'">'+esc(q)+'</span>';
 }
 
+// 전송 방식. 구버전 러너의 state.json에는 없으므로 mqtt로 본다.
+function isAtion(d){ return (d.transport||'mqtt')==='ation_http' }
+function txBadge(d){
+  return isAtion(d)
+    ? '<span class="badge tx" title="벤더(에이티온) HTTP 수집 경로 — '
+      + 'MQTT 커넥션이 없습니다">HTTP</span>'
+    : '';
+}
+
 // "아직 안 붙었을 뿐"과 "꺼졌다"는 다르다.
 //
 // 리로드·주입으로 갓 등재된 기기는 다음 틱에 접속한다. 이걸 전원 off와 같은
@@ -662,7 +681,8 @@ function badges(d){
   if(d.disabled) h+='<span class="badge r">비활성</span>';
   else if(d.event) h+='<span class="badge w">'+esc(d.event)+
     (d.event_manual?' 수동':'')+'</span>';
-  else if(isPendingConnect(d)) h+='<span class="badge wait">접속 대기(다음 틱)</span>';
+  else if(isPendingConnect(d)) h+='<span class="badge wait">'+
+    (isAtion(d)?'전송 대기(다음 틱)':'접속 대기(다음 틱)')+'</span>';
   else if(d.connected&&d.online) h+='<span class="badge g">정상</span>';
   if(d.pending>0) h+='<span class="badge">버퍼 '+d.pending+'</span>';
   if(d.event_ends_at!=null)
@@ -820,6 +840,7 @@ function render(state,invList,force){
   // 탭 필터는 두 경우 모두 동작한다.
   const all = running ? devs
     : invList.map(i=>({device_id:i.device_id,device_type:i.device_type,
+        transport:i.transport,
         connected:false,online:false,pending:0,event:null,disabled:false}));
   renderTabs(all,force);
   renderSiteBar(all,force);
@@ -843,7 +864,7 @@ function render(state,invList,force){
  *  (절대 종료시각은 넣는다: 이벤트가 바뀌면 다시 그려야 하므로.) */
 function cardSignature(d,info){
   return JSON.stringify([
-    d.device_id,d.device_type,d.site_id,d.profile,d.quality,
+    d.device_id,d.device_type,d.site_id,d.profile,d.quality,d.transport,
     d.connected,d.online,d.pending,
     d.event,d.event_manual,d.event_ends_at,d.disabled,d.disabled_reason,
     info.device_type,info.facility_type,
@@ -871,7 +892,7 @@ function cardHtml(d,interval,signature){
     '<div class="meta">'+esc(d.device_type||info.device_type||'')+
       (info.facility_type?' · '+esc(info.facility_type):'')+'</div>'+
     (site?'<div class="site">site '+esc(shortSite(site))+'…</div>':'')+
-    '<div>'+badges(d)+envBadge(d)+qualBadge(d)+'</div>'+
+    '<div>'+txBadge(d)+badges(d)+envBadge(d)+qualBadge(d)+'</div>'+
     '<div class="btns">'+
       '<button onclick="cmd(\\'on\\',\\''+id+'\\')">전원 on</button>'+
       '<button onclick="cmd(\\'off\\',\\''+id+'\\')">전원 off</button>'+
@@ -879,8 +900,11 @@ function cardHtml(d,interval,signature){
       '<button onclick="toggleForm(\\''+id+'\\',\\'burst\\')">버스트…</button>'+
       '<select title="환경 등급" onchange="setProfile(\\''+id+'\\',this.value)">'+
         presetOptions+'</select>'+
-      '<select title="측정 품질 — 값은 그대로, 신뢰도만 바뀝니다" '+
-        'onchange="setQuality(\\''+id+'\\',this.value)">'+
+      '<select title="'+(isAtion(d)
+          ? '에이티온 규격에 품질 필드가 없어 이 경로에는 적용되지 않습니다'
+          : '측정 품질 — 값은 그대로, 신뢰도만 바뀝니다')+'"'+
+        (isAtion(d)?' disabled':'')+
+        ' onchange="setQuality(\\''+id+'\\',this.value)">'+
         qualityOptions+'</select>'+
     '</div>'+
     (dropout?dropoutForm(d,interval):'')+

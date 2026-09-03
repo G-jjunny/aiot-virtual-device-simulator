@@ -226,6 +226,21 @@ def remaining_seconds(device: dict[str, Any], now: float | None = None) -> float
 
 TYPE_ABBREV = {"FIXED": "FIXED", "PORTABLE": "PORT", "WEARABLE": "WEAR"}
 
+ATION_HTTP = "ation_http"
+
+
+def format_connection(device: dict[str, Any]) -> str:
+    """CONN 칸. 전송 방식에 따라 뜻이 달라지므로 한곳에서 만든다.
+
+    ation_http 기기에는 유지되는 커넥션이 없어 yes/no가 오해를 부른다 —
+    "안 붙었다"가 아니라 "직전 전송이 실패했다"이고, 붙일 커넥션도 없다.
+    그래서 경로 이름을 그대로 보여주고 실패만 표시로 구분한다.
+    """
+    connected = bool(device.get("connected"))
+    if device.get("transport") == ATION_HTTP:
+        return "http" if connected else "http!"
+    return "yes" if connected else "no"
+
 
 def abbreviate_type(device_type: str | None) -> str:
     """상태 표의 좁은 컬럼에 맞춘 축약. 모르는 값은 앞 5글자만 남긴다.

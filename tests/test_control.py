@@ -333,3 +333,31 @@ def test_abbreviate_type_handles_missing_and_unknown():
     assert control.abbreviate_type(None) == "-"
     assert control.abbreviate_type("") == "-"
     assert control.abbreviate_type("SATELLITE") == "SATEL"
+
+
+def test_format_connection_uses_yes_no_for_mqtt():
+    assert control.format_connection({"transport": "mqtt", "connected": True}) == "yes"
+    assert control.format_connection({"transport": "mqtt", "connected": False}) == "no"
+
+
+def test_format_connection_defaults_to_mqtt_for_older_state_files():
+    assert control.format_connection({"connected": True}) == "yes"
+
+
+def test_format_connection_names_the_path_for_ation():
+    """붙일 커넥션이 없는 기기라 yes/no가 아니라 경로 이름을 보여준다."""
+    ok = {"transport": "ation_http", "connected": True}
+    failed = {"transport": "ation_http", "connected": False}
+
+    assert control.format_connection(ok) == "http"
+    assert control.format_connection(failed) == "http!"
+
+
+def test_format_connection_fits_the_column():
+    """CONN 칸은 6자다 — 넘치면 표가 어긋난다."""
+    for transport in ("mqtt", "ation_http"):
+        for connected in (True, False):
+            value = control.format_connection(
+                {"transport": transport, "connected": connected}
+            )
+            assert len(value) <= 6

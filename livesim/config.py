@@ -51,6 +51,17 @@ POWER_STATES = (POWER_ON, POWER_OFF_INITIAL)
 """인벤토리의 초기 전원 상태 값. 이벤트 이름 POWER_OFF와는 다른 축이다 —
 이쪽은 파일에 적는 시작 조건, 저쪽은 러너가 들고 있는 런타임 상태."""
 
+TRANSPORT_MQTT = "mqtt"
+TRANSPORT_ATION_HTTP = "ation_http"
+TRANSPORTS = (TRANSPORT_MQTT, TRANSPORT_ATION_HTTP)
+"""이 기기가 백엔드에 닿는 경로. 인벤토리에 **명시**하는 값이며 기본은 mqtt다.
+
+`device_type`으로 추론하지 않는다 — 웨어러블도 우리 브로커에 직접 발행할 수 있고
+(기존 동작), 실제 벤더 경유 여부는 그 기기를 누가 운영하느냐의 문제이지 기기
+종류의 문제가 아니다. 추론으로 정하면 기존 WEARABLE 항목의 동작이 파일을 고치지
+않았는데도 조용히 바뀐다.
+"""
+
 MIN_INTERVAL_SECONDS = 1
 SECONDS_PER_DAY = 86400
 
@@ -291,15 +302,27 @@ class DeviceCredential:
     이미 돌고 있는 기기에는 영향이 없다 (반대였다면 리로드가 사람이 켜둔
     기기를 말없이 다시 꺼버린다).
     """
+    transport: str = TRANSPORT_MQTT
+    """백엔드에 닿는 경로 (mqtt | ation_http). 생략 시 mqtt."""
+    latitude: float | None = None
+    longitude: float | None = None
+    """ation_http 경로의 위치 기준 좌표. 생략하면 device_id 해시로 흩뿌린다.
+
+    MQTT 페이로드에는 위치 필드가 없어 이 값이 쓰이지 않는다.
+    """
 
     @property
     def starts_powered_off(self) -> bool:
         return self.power == POWER_OFF_INITIAL
 
+    @property
+    def uses_ation_http(self) -> bool:
+        return self.transport == TRANSPORT_ATION_HTTP
+
 
 _INVENTORY_KEYS = {
     "device_id", "secret", "site_id", "device_type", "facility_type", "power",
-    "profile", "quality",
+    "profile", "quality", "transport", "latitude", "longitude",
 }
 
 
@@ -425,16 +448,54 @@ def parse_credential(where: str, entry: Any) -> DeviceCredential:
     if quality is not None:
         quality = validate_quality(f"{where}.quality", quality, InventoryError)
 
+    transport = entry.get("transport", TRANSPORT_MQTT)
+    if not isinstance(transport, str) or transport.strip().lower() not in TRANSPORTS:
+        raise InventoryError(
+            f"{where}.transport: {TRANSPORTS} 중 하나여야 합니다 (받은 값: {transport!r})"
+        )
+    transport = transport.strip().lower()
+
     return DeviceCredential(
         device_id=_inventory_text(where, entry, "device_id"),
-        secret=_inventory_text(where, entry, "secret"),
+        secret=_secret(where, entry, transport),
         site_id=_inventory_text(where, entry, "site_id"),
         device_type=_inventory_enum(where, entry, "device_type", DEVICE_TYPES),
         facility_type=_inventory_enum(where, entry, "facility_type", FACILITY_TYPES),
         profile=profile,
         quality=quality,
         power=power.strip().lower(),
+        transport=transport,
+        latitude=_coordinate(where, entry, "latitude", 90.0),
+        longitude=_coordinate(where, entry, "longitude", 180.0),
     )
+
+
+def _secret(where: str, entry: dict[str, Any], transport: str) -> str:
+    """secret은 mqtt 경로에서만 필수다.
+
+    ation_http 경로는 자격증명을 아예 쓰지 않는다 — 백엔드가 X-API-KEY를 걷어내고
+    발신 IP 화이트리스트로 바꿔서(v0.1.11), 토큰 교환도 MQTT 커넥션도 없다. 그런
+    기기에 secret을 요구하면 발급받을 곳이 없는 값을 지어내 적게 만들고, 그 가짜
+    값이 파일에 남아 나중에 진짜 시크릿과 구분되지 않는다.
+    """
+    if transport == TRANSPORT_ATION_HTTP and entry.get("secret") is None:
+        return ""
+    return _inventory_text(where, entry, "secret")
+
+
+def _coordinate(
+    where: str, entry: dict[str, Any], key: str, limit: float
+) -> float | None:
+    value = entry.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InventoryError(f"{where}.{key}: 숫자여야 합니다 (받은 값: {value!r})")
+    if not -limit <= value <= limit:
+        raise InventoryError(
+            f"{where}.{key}: -{limit:g}~{limit:g} 범위여야 합니다 (받은 값: {value!r})"
+        )
+    return float(value)
 
 
 @dataclass(frozen=True)

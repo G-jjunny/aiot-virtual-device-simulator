@@ -270,3 +270,55 @@ def test_ctl_status_marks_missing_quality_for_older_state_files(
 
     assert "QUAL" in out
     assert "AQ-01" in out
+
+
+# ---- ctl status — 전송 방식 -------------------------------------------
+
+
+def test_ctl_status_shows_http_instead_of_yes_no_for_ation(
+    tmp_path, monkeypatch, capsys
+):
+    """커넥션이 없는 기기에 yes/no를 쓰면 '안 붙었다'로 오독된다."""
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "WB-ATION-1", "device_type": "WEARABLE",
+         "transport": "ation_http", "connected": True, "online": True,
+         "pending": 0, "quality": None},
+    )
+
+    row = [line for line in out.splitlines() if line.startswith("WB-ATION-1")][0]
+    # DEVICE / TYPE / CONN / ONLINE ... — CONN 칸만 확인한다.
+    assert row.split()[2] == "http"
+
+
+def test_ctl_status_marks_a_failed_ation_send(tmp_path, monkeypatch, capsys):
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "WB-ATION-1", "device_type": "WEARABLE",
+         "transport": "ation_http", "connected": False, "online": True,
+         "pending": 0, "quality": None},
+    )
+
+    assert "http!" in out
+
+
+def test_ctl_status_keeps_yes_no_for_mqtt(tmp_path, monkeypatch, capsys):
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "AQ-01", "device_type": "FIXED", "transport": "mqtt",
+         "connected": True, "online": True, "pending": 0, "quality": "OK"},
+    )
+
+    assert "yes" in out
+    assert "http" not in out
+
+
+def test_ctl_status_treats_older_state_files_as_mqtt(tmp_path, monkeypatch, capsys):
+    """transport가 없던 러너의 state.json도 그대로 읽혀야 한다."""
+    out = run_status(
+        tmp_path, monkeypatch, capsys,
+        {"device_id": "AQ-01", "device_type": "FIXED", "connected": True,
+         "online": True, "pending": 0},
+    )
+
+    assert "yes" in out
