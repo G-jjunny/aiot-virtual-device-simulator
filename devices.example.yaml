@@ -77,3 +77,40 @@ devices:
     facility_type: SCHOOL
     profile: bad
     quality: DRIFT
+
+  # transport: 이 기기가 백엔드에 닿는 **경로** (mqtt | ation_http, 생략 시 mqtt).
+  #
+  #   mqtt        우리가 만든 측정기가 우리 EMQX 브로커로 직접 발행합니다.
+  #               secret → 디바이스 JWT 교환 → MQTT CONNECT 순서를 그대로 밟습니다.
+  #   ation_http  실제 웨어러블처럼 **벤더(에이티온) 서버가 백엔드로 HTTP push**하는
+  #               경로를 모의합니다. POST /v1/biometric/ingest 로 생체·환경 13종을
+  #               보냅니다.
+  #
+  # **device_type으로 추론하지 않습니다.** WEARABLE이어도 transport를 적지 않으면
+  # 지금까지처럼 MQTT로 발행합니다 — 기존 항목의 동작을 바꾸지 않기 위해서입니다.
+  #
+  # ation_http는 **secret이 필요 없습니다**. 백엔드가 이 경로의 인증을 발신 IP
+  # 화이트리스트로 바꿔서(v0.1.11) 토큰도 MQTT 커넥션도 쓰지 않습니다. 없는 값을
+  # 지어내 적으면 나중에 진짜 시크릿과 구분되지 않으므로 아예 비워 둡니다.
+  #
+  # ⚠ 이 경로에는 quality(측정 품질) 축이 적용되지 않습니다 — 에이티온 규격에
+  # 품질 필드가 없어 백엔드가 항상 OK로 적재합니다. profile(환경 등급)은 적용됩니다.
+  # dropout도 버퍼링·batch 재전송 없이 단순 발행 중단으로 격하됩니다.
+  - device_id: WB-ATION-01
+    site_id: "660e8400-e29b-41d4-a716-446655441111"
+    device_type: WEARABLE
+    facility_type: OFFICE
+    transport: ation_http
+
+  # latitude / longitude: ation_http 경로가 보내는 위치의 **기준 좌표**(선택).
+  # 생략하면 서울 도심을 중심으로 device_id 해시만큼 흩뿌립니다. 매 전송마다
+  # ±0.0003도의 측위 오차가 얹힙니다. MQTT 페이로드에는 위치 필드가 없어
+  # 이 값이 쓰이지 않습니다.
+  - device_id: WB-ATION-02
+    site_id: "660e8400-e29b-41d4-a716-446655441111"
+    device_type: WEARABLE
+    facility_type: WELFARE
+    transport: ation_http
+    profile: bad # 오염 환경의 생리 반응(심박↑·SpO2↓)이 그대로 적용됩니다
+    latitude: 37.46269
+    longitude: 127.05203

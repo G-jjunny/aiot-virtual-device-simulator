@@ -36,7 +36,7 @@ class ApiError(RuntimeError):
         return self.status is not None and 400 <= self.status < 500
 
 
-def _safe_error(res: requests.Response) -> str:
+def safe_error(res: requests.Response) -> str:
     """응답에서 진단에 필요한 부분만 뽑는다. 제출값은 절대 포함하지 않는다.
 
     422의 fieldErrors[].rejectedValue에는 제출한 secret이 그대로 담겨 온다.
@@ -89,7 +89,7 @@ def exchange_device_token(
     if res.status_code != 200:
         raise ApiError(
             f"디바이스 토큰 교환 실패 ({device_id}, {res.status_code}): "
-            f"{_safe_error(res)}",
+            f"{safe_error(res)}",
             status=res.status_code,
         )
     return res.json()["access_token"]
