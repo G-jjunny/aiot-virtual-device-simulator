@@ -3,6 +3,7 @@
 import json
 import textwrap
 import threading
+from pathlib import Path
 
 import pytest
 import requests
@@ -974,3 +975,109 @@ def test_injected_device_is_immediately_loadable(tmp_path):
 
     parsed = json.loads(json.dumps([c.device_id for c in load_inventory(path)]))
     assert parsed == ["AQ-01", "WB-01", "AQ-99"]
+
+
+# ---- 전송 방식 표시 ----------------------------------------------------
+
+
+ATION_INVENTORY = """
+devices:
+  - device_id: AQ-01
+    secret: super-secret-one
+    site_id: 550e8400-e29b-41d4-a716-446655440000
+    device_type: FIXED
+    facility_type: OFFICE
+  - device_id: WB-ATION-01
+    site_id: 550e8400-e29b-41d4-a716-446655440000
+    device_type: WEARABLE
+    facility_type: OFFICE
+    transport: ation_http
+"""
+
+
+def test_inventory_api_exposes_transport(panel):
+    """패널이 러너 없이도 카드를 그리려면 인벤토리에 경로가 실려야 한다."""
+    base, env = panel
+    Path(env.devices_file).write_text(
+        textwrap.dedent(ATION_INVENTORY), encoding="utf-8"
+    )
+
+    devices = requests.get(f"{base}/api/inventory", timeout=5).json()["devices"]
+
+    assert [item["transport"] for item in devices] == ["mqtt", "ation_http"]
+    assert all("secret" not in item for item in devices)
+
+
+def test_page_renders_a_transport_badge(panel):
+    base, _ = panel
+    page = requests.get(base, timeout=5).text
+
+    assert "function isAtion(" in page
+    assert "function txBadge(" in page
+    assert "txBadge(d)+badges(d)" in page
+    assert ".badge.tx{" in page
+
+
+def test_page_disables_the_quality_select_on_ation_cards(panel):
+    """규격에 품질 필드가 없다 — 누를 수 있게 두면 '눌러도 아무 일 없다'가 된다."""
+    base, _ = panel
+    page = requests.get(base, timeout=5).text
+
+    assert "(isAtion(d)?' disabled':'')" in page
+    assert "에이티온 규격에 품질 필드가 없어" in page
+
+
+def test_page_says_transfer_not_connect_while_ation_waits(panel):
+    base, _ = panel
+    page = requests.get(base, timeout=5).text
+
+    assert "전송 대기(다음 틱)" in page
+    assert "접속 대기(다음 틱)" in page   # MQTT 문구는 그대로
+
+
+def test_card_signature_includes_transport(panel):
+    """리로드로 경로가 바뀌면 카드를 다시 그려야 한다."""
+    base, _ = panel
+    page = requests.get(base, timeout=5).text
+
+    assert "d.profile,d.quality,d.transport," in page
+
+
+def test_append_device_records_a_non_default_transport(tmp_path):
+    devices = tmp_path / "devices.yaml"
+    devices.write_text(textwrap.dedent(INVENTORY), encoding="utf-8")
+
+    append_device(
+        devices,
+        {
+            "device_id": "WB-ATION-01",
+            "secret": "unused-but-harmless",
+            "site_id": "550e8400-e29b-41d4-a716-446655440000",
+            "device_type": "WEARABLE",
+            "facility_type": "OFFICE",
+            "transport": "ation_http",
+        },
+    )
+
+    added = load_inventory(devices)[-1]
+    assert added.transport == "ation_http"
+    assert "transport: ation_http" in devices.read_text(encoding="utf-8")
+
+
+def test_append_device_omits_the_default_transport(tmp_path):
+    """기본값 줄이 늘어나면 정작 다른 경로를 쓰는 기기가 눈에 띄지 않는다."""
+    devices = tmp_path / "devices.yaml"
+    devices.write_text(textwrap.dedent(INVENTORY), encoding="utf-8")
+
+    append_device(
+        devices,
+        {
+            "device_id": "AQ-99",
+            "secret": "s3cr3t",
+            "site_id": "550e8400-e29b-41d4-a716-446655440000",
+            "device_type": "FIXED",
+            "facility_type": "OFFICE",
+        },
+    )
+
+    assert "transport:" not in devices.read_text(encoding="utf-8")
